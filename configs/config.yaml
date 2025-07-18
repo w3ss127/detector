@@ -1,0 +1,53 @@
+# configs/config.yaml
+
+# General settings
+project_name: resnet_vit_training
+run_name: run_001
+seed: 42
+num_classes: 3
+output_dir: checkpoints/
+use_wandb: true
+
+# Data
+dataset:
+  train_path: data/train/
+  val_path: data/val/
+  test_path: data/test/
+  image_size: 224
+  num_workers: 4
+  batch_size: 64
+  pin_memory: true
+  shuffle: true
+
+# Model
+model:
+  name: resnet50_vit
+  pretrained: true
+  freeze_backbone: true
+  unfreeze_epoch: 5
+
+# Training
+train:
+  epochs: 30
+  mixed_precision: true
+  grad_clip: 1.0
+  early_stopping:
+    patience: 5
+    delta: 0.001
+
+# Optimizer
+optimizer:
+  name: adamw
+  lr: 1e-4
+  weight_decay: 1e-4
+
+# Scheduler
+scheduler:
+  name: cosine
+  warmup_epochs: 2
+  min_lr: 1e-6
+
+# DDP / GPU
+device: cuda
+distributed: false
+gpus: 1

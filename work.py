@@ -83,7 +83,7 @@ def load_and_prepare_test_images(path):
     return torch.stack(fixed_images)  # <--- Convert to tensor
 
 # Load test images
-test_images = load_and_prepare_test_images("./bm_test_images.pt")
+test_images = load_and_prepare_test_images("./semi_synthetic_0000.pt")
 print(test_images.shape)
 print(test_images[0])
 # ============================
