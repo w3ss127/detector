@@ -1,108 +1,166 @@
-import torch
-import torch.nn.functional as F
 import os
-
-# ============================
-# 1. Model Class Definition (match training definition)
-# ============================
-import torchvision.models as models
+import sys
+import glob
+import torch
 import torch.nn as nn
-from torchvision.models.vision_transformer import vit_b_16
-from torchvision.models import ViT_B_16_Weights
+import torch.nn.functional as F
+from torchvision import models, transforms
+import timm
 
-# Model parameters
-num_classes = 3
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# ============ CONFIGURATION ============
+BASE_DIR = "datasets"
+TEST_DIR = os.path.join(BASE_DIR, "test")
+SUBFOLDERS = ["real", "synthetic", "semi-synthetic"]
+CLASS_MAP = {"real": 0, "synthetic": 1, "semi-synthetic": 2}
+CLASS_NAMES = ["real", "synthetic", "semi-synthetic"]
+NUM_CLASSES = 3
+RESNET_VARIANT = "resnet50"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+SEED = 42
+torch.manual_seed(SEED)
 
-# Build backbone
-backbone = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-backbone_out_channels = backbone.fc.in_features
-backbone = nn.Sequential(*list(backbone.children())[:-2])  # remove last FC and pool
+# ✅ Set which class subfolder to load
+TARGET_SUBFOLDER = "synthetic"  # <<< CHANGE THIS to "synthetic" or "semi-synthetic"
 
-# Custom model with classifier
-class ResNetCustomTop(nn.Module):
-    def __init__(self, backbone, backbone_out_channels, num_classes):
+# ============ CHECK DEVICE ============
+print(f"🔧 Using device: {DEVICE}")
+
+# ============ TRANSFORMS ============
+test_transforms = transforms.Compose([
+    # transforms.Lambda(lambda x: x / 255.0),
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# ============ MODEL DEFINITION ============
+class ResNetViTHybrid(nn.Module):
+    def __init__(self, num_classes, resnet_variant="resnet50"):
         super().__init__()
-        resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        self.resnet_feature = nn.Sequential(*list(resnet.children())[:-2])  # [B, 2048, 7, 7]
-        self.norm = nn.BatchNorm2d(2048)
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.proj = nn.Linear(2048, 768)
+        if resnet_variant == "resnet50":
+            self.resnet = models.resnet50(weights='IMAGENET1K_V2')
+        elif resnet_variant == "resnet121":
+            self.resnet = models.resnet121(weights='IMAGENET1K_V2')
+        else:
+            raise ValueError("resnet_variant must be 'resnet50' or 'resnet121'")
+        resnet_fc_in = self.resnet.fc.in_features
+        self.resnet.fc = nn.Identity()
 
-        self.vit = vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1)
-        self.vit.heads = nn.Identity()
+        self.vit = timm.create_model('vit_base_patch16_224', pretrained=True)
+        vit_fc_in = self.vit.head.in_features
+        self.vit.head = nn.Identity()
 
-        self.classifier = nn.Sequential(
-            nn.Linear(768, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_classes)
-        )
+        self.fc1 = nn.Linear(resnet_fc_in + vit_fc_in, 512)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(512, num_classes)
+
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+        for param in self.vit.parameters():
+            param.requires_grad = False
 
     def forward(self, x):
-        x = self.resnet_feature(x)  # [B, 2048, 7, 7]
-        x = self.norm(x)
-        x = self.pool(x).flatten(1)  # [B, 2048]
-        x = self.proj(x).unsqueeze(1)  # [B, 1, 768]
-        x = self.vit.encoder(x)  # [B, 1, 768]
-        x = x.mean(dim=1)
-        return self.classifier(x)
+        res_feat = self.resnet(x)
+        vit_feat = self.vit(x)
+        combined = torch.cat([res_feat, vit_feat], dim=1)
+        out = self.relu(self.fc1(combined))
+        out = self.dropout(out)
+        return self.fc2(out)
 
-# Instantiate model
-model = ResNetCustomTop(backbone, backbone_out_channels, num_classes).to(device)
+# ============ LOAD MODEL ============
+model_path = "best_model.pt"
+model = ResNetViTHybrid(NUM_CLASSES, resnet_variant=RESNET_VARIANT).to(DEVICE)
 
-# ============================
-# 2. Load Weights
-# ============================
-checkpoint = torch.load("bitmind.pth", map_location="cpu")
-if "model_state_dict" in checkpoint:
-    model.load_state_dict(checkpoint["model_state_dict"])
-else:
-    model.load_state_dict(checkpoint)
-print("✅ Loaded model from bitmind.pth")
+if not os.path.exists(model_path):
+    print(f"❌ Model file {model_path} not found.")
+    sys.exit(1)
 
-# ============================
-# 3. Load & Preprocess Test Images
-# ============================
-def load_and_prepare_test_images(path):
-    all_images = torch.load(path)
-    fixed_images = []
-    converted, skipped = 0, 0
+try:
+    checkpoint = torch.load(model_path, map_location=DEVICE)
+    model.load_state_dict(checkpoint["model_state_dict"] if "model_state_dict" in checkpoint else checkpoint)
+    print(f"✅ Loaded model from {model_path}")
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    sys.exit(1)
 
-    for i, img in enumerate(all_images):
-        if img.shape == (1, 256, 256):
-            img = img.repeat(3, 1, 1)
-            converted += 1
-        if img.shape != (3, 256, 256):
-            print(f"❌ Skipping image {i} with shape {img.shape}")
-            skipped += 1
+# ============ CHECK SUBFOLDER ============
+if TARGET_SUBFOLDER not in SUBFOLDERS:
+    print(f"❌ Invalid subfolder: {TARGET_SUBFOLDER}. Choose from {SUBFOLDERS}")
+    sys.exit(1)
+
+subfolder_path = os.path.join(TEST_DIR, TARGET_SUBFOLDER)
+if not os.path.exists(subfolder_path):
+    print(f"❌ Folder not found: {subfolder_path}")
+    sys.exit(1)
+
+print(f"\n📂 Loading .pt files from: {subfolder_path}")
+test_files = glob.glob(os.path.join(subfolder_path, "*.pt"))
+if not test_files:
+    print(f"❌ No .pt files in {subfolder_path}")
+    sys.exit(1)
+
+# ============ LOAD + PREPROCESS IMAGES ============
+class_label = CLASS_MAP[TARGET_SUBFOLDER]
+test_images, test_labels = [], []
+
+for file in test_files:
+    print(f"📄 Processing file: {file}")
+    try:
+        data = torch.load(file, map_location=DEVICE)
+        if not isinstance(data, torch.Tensor) or len(data.shape) != 4:
+            print(f"❌ Invalid format or shape in {file}")
             continue
-        fixed_images.append(img)
+        valid_images = []
+        for i in range(data.shape[0]):
+            img = data[i]
+            if not isinstance(img, torch.Tensor) or torch.isnan(img).any() or torch.isinf(img).any():
+                continue
+            img = img.float()
+            img = test_transforms(img)
+            valid_images.append(img)
+        if valid_images:
+            test_images.append(torch.stack(valid_images))
+            test_labels.append(torch.tensor([class_label] * len(valid_images), dtype=torch.long))
+            print(f"✅ {file}: Loaded {len(valid_images)} valid images.")
+        else:
+            print(f"⚠️ No valid images in {file}")
+    except Exception as e:
+        print(f"❌ Failed to process {file}: {e}")
 
-    print(f"✅ Converted: {converted}, Skipped: {skipped}, Total: {len(fixed_images)}")
-    return torch.stack(fixed_images)  # <--- Convert to tensor
+# ============ STACK IMAGES ============
+if not test_images:
+    print("❌ No valid test images found.")
+    sys.exit(1)
 
-# Load test images
-test_images = load_and_prepare_test_images("./semi_synthetic_0000.pt")
-print(test_images.shape)
-print(test_images[0])
-# ============================
-# 4. Run Inference One-by-One
-# ============================
+test_images = torch.cat(test_images, dim=0)
+test_labels = torch.cat(test_labels, dim=0)
+print(test_labels)
+print(f"\n📊 Total test samples: {test_images.shape[0]}")
+
+# ============ INFERENCE ============
+model.eval()
+correct = 0
 predictions = []
-cnt = 0
-for i, img in enumerate(test_images):
-    img = img.unsqueeze(0).float()  # shape: [1, 3, 256, 256]
-    img = F.interpolate(img, size=(224, 224), mode='bilinear', align_corners=False)
-    img = img.to(device)
-    with torch.no_grad():
+
+with torch.no_grad():
+    for i, img in enumerate(test_images):
+        img = img.unsqueeze(0).to(DEVICE)
+        # print(img)
         output = model(img)
+        
         probs = F.softmax(output, dim=1)
         pred = torch.argmax(probs, dim=1).item()
-        prob_list = probs.cpu().squeeze().tolist()
-        print(f"Image {i+1}/{len(test_images)}: Predicted class → {pred}, Probabilities: { [round(p, 4) for p in prob_list] }")
-        if pred == 0:
-            cnt += 1
+        label = test_labels[i].item()
         predictions.append(pred)
-print(cnt)
-print(f"\n✅ Inference complete. Total images processed: {len(predictions)}")
+        if pred == label:
+            correct += 1
+        # print(f"🖼️ Image {i+1}: Predicted → {CLASS_NAMES[pred]}, Probabilities → {[round(p, 4) for p in probs.squeeze().tolist()]}")
+
+# ============ ACCURACY ============
+accuracy = 100 * correct / len(test_labels)
+print(f"\n✅ Inference complete for '{TARGET_SUBFOLDER}'.")
+print(f"🎯 Accuracy: {accuracy:.2f}% ({correct}/{len(test_labels)})")

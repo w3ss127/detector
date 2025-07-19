@@ -1,0 +1,63 @@
+2025-07-19 10:41:30,387 - INFO - Run ID: a42fc1ab
+2025-07-19 10:41:30,388 - INFO - Loading test dataset (Run ID: a42fc1ab)
+2025-07-19 10:41:50,593 - INFO - Loaded 60000 images: real: 20000, synthetic: 20000, semi-synthetic: 20000
+2025-07-19 10:41:50,838 - INFO - Test:
+2025-07-19 10:41:50,838 - INFO - Total images: 60000
+2025-07-19 10:41:50,838 - INFO - real: 20000 images (33.33% if non-zero), synthetic: 20000 images (33.33% if non-zero), semi-synthetic: 20000 images (33.33% if non-zero)
+2025-07-19 10:41:50,839 - INFO - === Test Check ===
+2025-07-19 10:41:50,839 - INFO - Dataset size: 60000
+2025-07-19 10:41:50,839 - INFO - Class counts: [20000, 20000, 20000]
+2025-07-19 10:41:50,839 - INFO - RGB counts: [20000, 20000, 20000]
+2025-07-19 10:41:50,839 - INFO - Grayscale counts: [0, 0, 0]
+2025-07-19 10:41:50,839 - INFO - Sampling 5 images from Test:
+2025-07-19 10:41:53,573 - INFO - Index 30014: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-2.079120397567749, 1.7516475915908813]
+2025-07-19 10:41:56,289 - INFO - Index 20704: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-1.8825119733810425, 2.6186838150024414]
+2025-07-19 10:41:57,109 - INFO - Index 39358: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.1094608306884766, 2.2971677780151367]
+2025-07-19 10:41:59,537 - INFO - Index 59901: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-1.7737032175064087, 1.7265400886535645]
+2025-07-19 10:42:00,324 - INFO - Index 34204: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.0903139114379883, 2.369037628173828]
+2025-07-19 10:42:00,324 - INFO - First 3 batches from Test loader:
+2025-07-19 10:45:12,331 - INFO - Batch 1 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:45:12,331 - INFO - Labels: [2, 2, 2, 2, 1, 0, 2, 1, 2, 2, 0, 2, 2, 1, 2, 1, 1, 1, 2, 0, 2, 1, 0, 0, 1, 0, 1, 2, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 1, 2, 0, 2, 0, 2, 1, 2, 1, 1, 0, 2, 1, 0, 2, 1, 0, 0, 1, 2, 1, 2, 2, 1, 0, 2, 0, 2, 0, 0, 1, 0, 2, 0, 2, 1, 2, 1, 1, 0, 2, 2, 2, 0, 1, 2, 2, 1, 0, 1, 0, 0, 1, 1, 0, 1, 2, 1, 1, 1, 2, 2, 2, 2, 0, 1, 0, 2, 2, 1, 2, 0, 2, 1, 2, 2, 0, 0, 0, 1, 1, 1, 2, 1, 2, 0, 2, 0, 2]
+2025-07-19 10:45:12,388 - INFO - Class distribution: real=40, synthetic=40, semi-synthetic=48
+2025-07-19 10:45:14,502 - INFO - Batch 2 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:45:14,503 - INFO - Labels: [1, 1, 1, 0, 1, 2, 0, 1, 2, 2, 2, 0, 1, 1, 2, 0, 0, 2, 0, 2, 2, 1, 2, 2, 0, 0, 2, 0, 2, 2, 0, 0, 1, 2, 1, 0, 2, 0, 2, 2, 1, 0, 2, 0, 1, 0, 1, 2, 2, 1, 0, 2, 1, 0, 1, 0, 0, 0, 2, 2, 2, 0, 2, 2, 2, 1, 2, 0, 1, 0, 1, 1, 2, 0, 2, 1, 0, 2, 1, 1, 2, 0, 1, 1, 1, 0, 1, 2, 2, 1, 2, 1, 1, 1, 2, 0, 1, 1, 2, 0, 2, 1, 2, 1, 2, 1, 2, 0, 0, 2, 2, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 2, 2, 2, 0, 2]
+2025-07-19 10:45:14,503 - INFO - Class distribution: real=39, synthetic=42, semi-synthetic=47
+2025-07-19 10:45:14,508 - INFO - Batch 3 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:45:14,508 - INFO - Labels: [1, 2, 1, 1, 2, 1, 2, 2, 1, 1, 2, 1, 0, 0, 0, 0, 1, 2, 1, 2, 0, 0, 2, 2, 2, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 2, 2, 1, 0, 0, 0, 2, 1, 1, 0, 1, 1, 2, 1, 1, 1, 2, 1, 0, 0, 1, 2, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 2, 1, 1, 0, 1, 1, 0, 0, 2, 0, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 1, 1, 0, 1, 1, 2, 0, 0, 0, 1, 1, 2, 0, 1, 0, 0, 0, 2, 0, 2, 2, 0, 0, 0, 0, 0, 2, 0, 0, 2, 1, 1, 1, 1, 1]
+2025-07-19 10:45:14,508 - INFO - Class distribution: real=41, synthetic=52, semi-synthetic=35
+2025-07-19 10:46:09,565 - INFO - Loading pretrained weights from Hugging Face hub (timm/vit_base_patch16_224.augreg2_in21k_ft_in1k)
+2025-07-19 10:46:09,878 - INFO - Loading pretrained weights from Hugging Face hub (timm/resnet50.a1_in1k)
+2025-07-19 10:46:11,125 - INFO - [timm/resnet50.a1_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+2025-07-19 10:46:12,315 - INFO - Loading pretrained weights from Hugging Face hub (timm/vit_base_patch16_224.augreg2_in21k_ft_in1k)
+2025-07-19 10:46:12,388 - INFO - [timm/vit_base_patch16_224.augreg2_in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+2025-07-19 10:46:12,665 - INFO - Loading full training dataset (Run ID: a42fc1ab)
+2025-07-19 10:50:51,411 - INFO - Loaded 600000 images: real: 200000, synthetic: 200000, semi-synthetic: 200000
+2025-07-19 10:50:51,815 - INFO - Train:
+2025-07-19 10:50:51,816 - INFO - Total images: 600000
+2025-07-19 10:50:51,816 - INFO - real: 200000 images (33.33% if non-zero), synthetic: 200000 images (33.33% if non-zero), semi-synthetic: 200000 images (33.33% if non-zero)
+2025-07-19 10:50:51,816 - INFO - === Train Check ===
+2025-07-19 10:50:51,816 - INFO - Dataset size: 600000
+2025-07-19 10:50:51,816 - INFO - Class counts: [200000, 200000, 200000]
+2025-07-19 10:50:51,816 - INFO - RGB counts: [200000, 200000, 200000]
+2025-07-19 10:50:51,816 - INFO - Grayscale counts: [0, 0, 0]
+2025-07-19 10:50:51,816 - INFO - Sampling 5 images from Train:
+2025-07-19 10:50:52,767 - INFO - Index 274686: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.1179039478302, 2.4064571857452393]
+2025-07-19 10:50:53,703 - INFO - Index 87884: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.0120511054992676, 2.615792989730835]
+2025-07-19 10:50:54,690 - INFO - Index 362228: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.1179039478302, 2.2450525760650635]
+2025-07-19 10:50:57,817 - INFO - Index 78894: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-2.0014822483062744, 1.1204036474227905]
+2025-07-19 10:51:00,977 - INFO - Index 307821: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-1.891255497932434, 1.9163225889205933]
+2025-07-19 10:51:00,978 - INFO - First 3 batches from Train loader:
+2025-07-19 10:57:14,033 - INFO - Batch 1 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:57:14,036 - INFO - Labels: [2, 2, 2, 0, 1, 1, 0, 2, 1, 1, 2, 2, 0, 1, 0, 1, 1, 2, 1, 0, 1, 0, 0, 2, 0, 1, 2, 1, 2, 2, 1, 2, 1, 0, 2, 0, 0, 1, 2, 1, 2, 2, 1, 1, 1, 2, 0, 2, 2, 0, 2, 1, 1, 2, 1, 2, 0, 2, 1, 0, 1, 2, 0, 2, 0, 2, 2, 1, 0, 0, 1, 2, 1, 2, 1, 1, 1, 2, 1, 1, 0, 2, 2, 2, 1, 1, 0, 1, 2, 0, 1, 1, 0, 2, 2, 0, 1, 0, 2, 1, 2, 1, 1, 2, 0, 0, 0, 2, 0, 1, 0, 2, 0, 0, 2, 0, 0, 2, 0, 1, 2, 2, 2, 1, 1, 2, 2, 0]
+2025-07-19 10:57:14,050 - INFO - Class distribution: real=36, synthetic=44, semi-synthetic=48
+2025-07-19 10:57:14,054 - INFO - Batch 2 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:57:14,055 - INFO - Labels: [1, 2, 1, 0, 1, 2, 2, 0, 1, 1, 2, 2, 2, 2, 0, 0, 1, 1, 1, 2, 2, 0, 0, 1, 2, 1, 2, 0, 1, 1, 2, 1, 1, 2, 1, 1, 1, 2, 1, 2, 0, 2, 0, 1, 0, 2, 1, 0, 0, 1, 1, 1, 1, 0, 2, 1, 0, 0, 0, 2, 1, 2, 0, 0, 0, 2, 2, 0, 2, 2, 0, 2, 1, 2, 2, 0, 1, 1, 0, 1, 2, 2, 1, 0, 2, 2, 0, 0, 1, 0, 0, 0, 2, 1, 1, 0, 1, 0, 0, 2, 2, 1, 2, 1, 2, 1, 2, 2, 0, 1, 2, 1, 2, 2, 0, 0, 2, 0, 2, 1, 1, 0, 0, 0, 1, 0, 2, 1]
+2025-07-19 10:57:14,055 - INFO - Class distribution: real=40, synthetic=44, semi-synthetic=44
+2025-07-19 10:57:14,060 - INFO - Batch 3 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 10:57:14,060 - INFO - Labels: [2, 1, 2, 0, 2, 0, 0, 1, 2, 2, 2, 2, 0, 0, 2, 0, 0, 0, 0, 2, 1, 2, 1, 0, 2, 1, 0, 1, 2, 1, 1, 0, 1, 0, 2, 2, 1, 1, 0, 0, 1, 0, 0, 1, 2, 0, 2, 0, 2, 1, 1, 2, 1, 0, 1, 1, 1, 1, 0, 2, 2, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 2, 1, 0, 0, 2, 0, 0, 1, 1, 0, 0, 2, 0, 2, 0, 1, 0, 1, 2, 1, 1, 1, 0, 2, 0, 1, 2, 2, 1, 0, 0, 1, 1, 0, 2, 1, 2, 0, 2, 0, 2, 0, 2, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 2, 2, 0]
+2025-07-19 10:57:14,061 - INFO - Class distribution: real=49, synthetic=44, semi-synthetic=35
+2025-07-19 10:58:14,136 - INFO - Train subset size: 480000
+2025-07-19 10:58:14,591 - INFO - Train subset distribution: real=160219, synthetic=159893, semi-synthetic=159888
+2025-07-19 10:58:14,591 - INFO - Validation subset size: 120000
+2025-07-19 10:58:14,701 - INFO - Validation subset distribution: real=39781, synthetic=40107, semi-synthetic=40112
+2025-07-19 10:58:15,259 - INFO - Epoch 1/5 (Run ID: a42fc1ab)
