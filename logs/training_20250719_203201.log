@@ -1,0 +1,30 @@
+2025-07-19 20:32:01,551 - INFO - Run ID: 1a1f6d6a
+2025-07-19 20:32:01,552 - INFO - Loading test dataset (Run ID: 1a1f6d6a)
+2025-07-19 20:32:29,311 - INFO - Loaded 60000 images: real: 20000, synthetic: 20000, semi-synthetic: 20000
+2025-07-19 20:32:29,544 - INFO - Test:
+2025-07-19 20:32:29,544 - INFO - Total images: 60000
+2025-07-19 20:32:29,544 - INFO - real: 20000 images (33.33% if non-zero), synthetic: 20000 images (33.33% if non-zero), semi-synthetic: 20000 images (33.33% if non-zero)
+2025-07-19 20:32:29,544 - INFO - === Test Check ===
+2025-07-19 20:32:29,544 - INFO - Dataset size: 60000
+2025-07-19 20:32:29,544 - INFO - Class counts: [20000, 20000, 20000]
+2025-07-19 20:32:29,546 - INFO - Sampling 5 images from Test:
+2025-07-19 20:32:31,948 - INFO - Index 30014: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-2.079120397567749, 1.7516475915908813]
+2025-07-19 20:32:34,308 - INFO - Index 20704: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-1.8825119733810425, 2.6186838150024414]
+2025-07-19 20:32:34,912 - INFO - Index 39358: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.1094608306884766, 2.2971677780151367]
+2025-07-19 20:32:37,332 - INFO - Index 59901: Shape=torch.Size([3, 224, 224]), Label=2, Type=RGB, Post-normalization pixel range [-1.7737032175064087, 1.7265400886535645]
+2025-07-19 20:32:37,921 - INFO - Index 34204: Shape=torch.Size([3, 224, 224]), Label=1, Type=RGB, Post-normalization pixel range [-2.0903139114379883, 2.369037628173828]
+2025-07-19 20:32:37,921 - INFO - First 3 batches from Test loader:
+2025-07-19 20:36:11,585 - INFO - Batch 1 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 20:36:11,586 - INFO - Labels: [2, 1, 2, 2, 0, 2, 0, 1, 1, 0, 1, 2, 0, 1, 1, 1, 0, 1, 0, 0, 1, 2, 2, 2, 0, 2, 0, 0, 1, 1, 0, 0, 1, 2, 1, 0, 1, 2, 2, 1, 2, 2, 1, 2, 0, 2, 2, 2, 0, 1, 0, 0, 2, 1, 2, 0, 0, 1, 1, 1, 0, 2, 1, 1, 0, 2, 2, 2, 0, 1, 1, 0, 2, 1, 0, 0, 0, 1, 1, 1, 1, 0, 2, 2, 1, 1, 1, 2, 1, 1, 1, 2, 2, 0, 0, 2, 2, 2, 0, 1, 1, 0, 0, 0, 2, 1, 2, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 2, 2, 0, 2, 1, 2, 1, 0, 2, 2]
+2025-07-19 20:36:11,651 - INFO - Class distribution: real=39, synthetic=48, semi-synthetic=41
+2025-07-19 20:36:11,660 - INFO - Batch 2 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 20:36:11,660 - INFO - Labels: [0, 2, 2, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 2, 0, 0, 0, 2, 1, 1, 1, 0, 1, 2, 2, 1, 1, 2, 0, 0, 2, 0, 1, 2, 1, 0, 2, 2, 1, 0, 0, 1, 0, 1, 0, 1, 2, 0, 0, 0, 2, 0, 2, 1, 0, 0, 1, 2, 1, 2, 0, 2, 1, 0, 1, 2, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 0, 0, 0, 2, 2, 0, 1, 2, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 2, 2, 1, 0, 0, 1, 1, 0, 2, 2, 1, 0, 2, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1]
+2025-07-19 20:36:11,661 - INFO - Class distribution: real=60, synthetic=41, semi-synthetic=27
+2025-07-19 20:36:11,667 - INFO - Batch 3 shape: images=torch.Size([128, 3, 224, 224]), labels=torch.Size([128]), Device=cuda:0
+2025-07-19 20:36:11,667 - INFO - Labels: [0, 0, 0, 2, 2, 2, 1, 1, 1, 1, 2, 1, 2, 0, 0, 1, 2, 0, 2, 0, 1, 2, 2, 0, 1, 0, 2, 2, 0, 0, 1, 0, 2, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 1, 1, 1, 2, 1, 0, 2, 2, 1, 0, 0, 0, 0, 2, 1, 2, 1, 0, 2, 1, 2, 0, 0, 1, 1, 1, 2, 0, 1, 1, 2, 2, 0, 1, 1, 1, 2, 1, 1, 1, 2, 2, 1, 2, 2, 2, 0, 1, 0, 1, 1, 1, 1, 2, 0, 0, 2, 2, 0, 2, 1, 2, 0, 0, 0, 0, 2, 1, 0, 2, 1, 2, 0, 1, 2, 2, 1, 1, 1, 1]
+2025-07-19 20:36:11,667 - INFO - Class distribution: real=43, synthetic=46, semi-synthetic=39
+2025-07-19 20:36:16,708 - INFO - Loading pretrained weights from Hugging Face hub (timm/resnet50 and vit_base_patch16_224)
+2025-07-19 20:36:17,018 - INFO - Loading pretrained weights from Hugging Face hub (timm/resnet50.a1_in1k)
+2025-07-19 20:36:17,183 - INFO - [timm/resnet50.a1_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+2025-07-19 20:36:19,930 - INFO - Loading pretrained weights from Hugging Face hub (timm/vit_base_patch16_224.augreg2_in21k_ft_in1k)
+2025-07-19 20:36:20,009 - INFO - [timm/vit_base_patch16_224.augreg2_in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
