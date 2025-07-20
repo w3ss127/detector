@@ -4,4 +4,3 @@ __pycache__
 *.pth
 
 datasets/
-make_datasets_pt.py
