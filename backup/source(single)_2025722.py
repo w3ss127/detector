@@ -19,12 +19,12 @@ import multiprocessing
 # Configuration for training settings
 class Config:
     NUM_CLASSES = 3
-    BATCH_SIZE = 64
-    NUM_EPOCHS = 5
-    LEARNING_RATE = 0.001
-    FINETUNE_LR = 0.0001
+    BATCH_SIZE = 128
+    NUM_EPOCHS = 20
+    LEARNING_RATE = 0.0001
+    FINETUNE_LR = 0.00001
     FREEZE_EPOCHS = 10
-    TRAIN_DIR = "datasets/basic"
+    TRAIN_DIR = "datasets/train"
     TEST_DIR = "datasets/test"
     CHECKPOINT_DIR = "checkpoints"
     LOG_DIR = "logs"
@@ -34,6 +34,13 @@ class Config:
     MIN_DELTA = 0.001  # Minimum MCC improvement for early stopping
     NUM_WORKERS = min(4, multiprocessing.cpu_count() // 2)
     IMAGE_SIZE = (224, 224)
+    NORMALIZE_MEAN = [0.485, 0.456, 0.406]
+    NORMALIZE_STD = [0.229, 0.224, 0.225]
+    AUGMENTATION_PARAMS = {
+        "rotation_degrees": 15,
+        "brightness": 0.2,
+        "contrast": 0.2
+    }
 
 def setup_logging(log_dir, log_file):
     """Configure logging to file and console."""
@@ -65,8 +72,17 @@ def get_transforms(is_training=True):
         transforms.Resize(Config.IMAGE_SIZE, interpolation=transforms.InterpolationMode.BILINEAR),
     ]
     if is_training:
-        transforms_list.append(transforms.RandomHorizontalFlip())
-    # No normalization to keep images in [0, 1]
+        transforms_list.extend([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(Config.AUGMENTATION_PARAMS["rotation_degrees"]),
+            transforms.ColorJitter(
+                brightness=Config.AUGMENTATION_PARAMS["brightness"],
+                contrast=Config.AUGMENTATION_PARAMS["contrast"]
+            ),
+        ])
+    transforms_list.append(
+        transforms.Normalize(mean=Config.NORMALIZE_MEAN, std=Config.NORMALIZE_STD)
+    )
     return transforms.Compose(transforms_list)
 
 class ResNetViTHybrid(nn.Module):
@@ -128,9 +144,6 @@ class LargeTensorDataset(Dataset):
                     images = torch.load(pt_file, map_location="cpu")
                     if images.shape[0] == 0:
                         continue
-                    if images.dtype != torch.uint8:
-                        logging.error(f"Unexpected dtype in {pt_file}: {images.dtype}, expected uint8")
-                        raise ValueError(f"Expected uint8 images in {pt_file}")
                     for sample_idx in range(images.shape[0]):
                         self.image_paths.append((pt_file, sample_idx))
                         self.labels.append(class_idx)
@@ -164,17 +177,9 @@ class LargeTensorDataset(Dataset):
             image = images[sample_idx]
             if image.shape[0] not in {1, 3}:
                 raise ValueError(f"Invalid channel count: {image.shape[0]} in {pt_file}")
-            if image.dtype != torch.uint8:
-                raise ValueError(f"Expected uint8 image in {pt_file}[{sample_idx}], got {image.dtype}")
-            if idx < 10:
-                logging.info(f"Image {idx} from {pt_file}[{sample_idx}] raw: dtype={image.dtype}, min={image.min():.4f}, max={image.max():.4f}, shape={image.shape}")
-            image = image.float() / 255.0  # Scale uint8 to [0, 1]
-            if idx < 10:
-                logging.info(f"Image {idx} post-scale: min={image.min():.4f}, max={image.max():.4f}, shape={image.shape}")
+            image = image.float() / 255.0  # Assume uint8 input
             if self.transform:
                 image = self.transform(image)
-            if idx < 10:
-                logging.info(f"Image {idx} post-transform: min={image.min():.4f}, max={image.max():.4f}, shape={image.shape}")
             if image.shape != (3, Config.IMAGE_SIZE[0], Config.IMAGE_SIZE[1]):
                 raise ValueError(f"Invalid shape after transform: {image.shape} in {pt_file}")
             return image, self.labels[idx]
@@ -315,7 +320,7 @@ def main():
     test_dataset = LargeTensorDataset(Config.TEST_DIR, transform=val_transform, is_test=True)
     test_loader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
                              num_workers=Config.NUM_WORKERS, pin_memory=True, prefetch_factor=2, persistent_workers=True)
-    train_dataset = LargeTensorDataset(Config.TRAIN_DIR, transform=train_transform)
+    train_dataset = LargeTensorDataset(Config.TRAIN_DIR, transform=train_transform, is_test=False)
     indices = list(range(len(train_dataset)))
     np.random.seed(42)
     np.random.shuffle(indices)
@@ -337,14 +342,14 @@ def main():
     scaler = GradScaler('cuda')
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
     best_mcc = -1.0
-    no_improvement_epochs = 0
+    no_improve_epochs = 0
     start_epoch = 0
 
     # Load checkpoint
     os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
-    latest_checkpoint = max(glob.glob(os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}*.pt")), key=os.path.getctime, default=None)
+    latest_checkpoint = max(glob.glob(os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}.pt")), key=os.path.getctime, default=None)
     if latest_checkpoint:
-        start_epoch, best_mcc, no_improvement_epochs, frozen汝, run_id = load_checkpoint(model, optimizer, scaler, latest_checkpoint)
+        start_epoch, best_mcc, no_improve_epochs, frozen, run_id = load_checkpoint(model, optimizer, scaler, latest_checkpoint)
         if frozen and start_epoch >= Config.FREEZE_EPOCHS:
             model.unfreeze_backbone()
             optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.FINETUNE_LR, weight_decay=0.0001)
@@ -352,53 +357,51 @@ def main():
             logging.info(f"Unfreezing model and setting learning rate to {Config.FINETUNE_LR}")
 
     # Training loop
-    try:
-        for epoch in range(start_epoch, Config.NUM_EPOCHS):
-            logging.info(f"Epoch {epoch + 1}/{Config.NUM_EPOCHS}")
-            if epoch == Config.FREEZE_EPOCHS and not model.resnet.conv1.weight.requires_grad:
-                model.unfreeze_backbone()
-                optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.FINETUNE_LR, weight_decay=0.0001)
-                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
-                logging.info(f"Unfreezing model and setting learning rate to {Config.FINETUNE_LR}")
+    for epoch in range(start_epoch, Config.NUM_EPOCHS):
+        logging.info(f"Epoch {epoch + 1}/{Config.NUM_EPOCHS}")
+        if epoch == Config.FREEZE_EPOCHS and not model.resnet.conv1.weight.requires_grad:
+            model.unfreeze_backbone()
+            optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.FINETUNE_LR, weight_decay=0.0001)
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
+            logging.info(f"Unfreezing model and setting learning rate to {Config.FINETUNE_LR}")
 
-            train_loss, train_acc, train_mcc, _ = train(model, train_loader, optimizer, criterion, scaler, epoch, run_id)
-            val_loss, val_acc, val_mcc, _ = validate(model, val_loader, criterion, epoch, run_id)
+        train_loss, train_acc, train_mcc, _ = train(model, train_loader, optimizer, criterion, scaler, epoch, run_id)
+        val_loss, val_acc, val_mcc, _ = validate(model, val_loader, criterion, epoch, run_id)
 
-            current_lr = optimizer.param_groups[0]['lr']
-            logging.info(f"Learning rate: {current_lr:.6f}")
-            scheduler.step(val_mcc)
-            new_lr = optimizer.param_groups[0]['lr']
-            if new_lr != current_lr:
-                logging.info(f"Learning rate reduced to {new_lr:.6f}")
+        current_lr = optimizer.param_groups[0]['lr']
+        logging.info(f"Learning rate: {current_lr:.6f}")
+        scheduler.step(val_mcc)
+        new_lr = optimizer.param_groups[0]['lr']
+        if new_lr != current_lr:
+            logging.info(f"Learning rate reduced to {new_lr:.6f}")
 
-            checkpoint = {
-                'model_state_dict': model.state_dict(),
-                'optimizer_state': optimizer.state_dict(),
-                'scaler_state': scaler.state_dict(),
-                'epoch': epoch + 1,
-                'best_mcc': best_mcc,
-                'no_improvement_epochs': no_improvement_epochs,
-                'frozen': not model.resnet.conv1.weight.requires_grad,
-                'run_id': run_id
-            }
-            checkpoint_path = os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}_epoch_{epoch+1}.pt")
-            torch.save(checkpoint, checkpoint_path)
-            logging.info(f"Saved checkpoint: {checkpoint_path}")
-            if val_mcc > best_mcc + Config.MIN_DELTA:
-                best_mcc = val_mcc
-                no_improvement_epochs = 0
-                best_checkpoint_path = os.path.join(Config.CHECKPOINT_DIR, f"best_model_mcc_{best_mcc:.4f}_{run_id}.pt")
-                torch.save(checkpoint, best_checkpoint_path)
-                logging.info(f"Saved best model (MCC: {best_mcc:.4f})")
-            else:
-                no_improvement_epochs += 1
-                if no_improvement_epochs >= Config.PATIENCE:
-                    logging.info(f"Early stopping after {no_improvement_epochs} epochs with no improvement")
-                    break
-    finally:
-        logging.info("Testing model...")
-        test(model, test_loader, run_id)
-        cleanup_logging()
+        checkpoint = {
+            'model_state_dict': model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scaler_state': scaler.state_dict(),
+            'epoch': epoch + 1,
+            'best_mcc': best_mcc,
+            'no_improve_epochs': no_improve_epochs,
+            'frozen': not model.resnet.conv1.weight.requires_grad,
+            'run_id': run_id
+        }
+        checkpoint_path = os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}.pt")
+        torch.save(checkpoint, checkpoint_path)
+        if val_mcc > best_mcc + Config.MIN_DELTA:
+            best_mcc = val_mcc
+            no_improve_epochs = 0
+            best_checkpoint_path = os.path.join(Config.CHECKPOINT_DIR, f"best_model_mcc_{best_mcc:.4f}_{run_id}.pt")
+            torch.save(checkpoint, best_checkpoint_path)
+            logging.info(f"Saved best model (MCC: {best_mcc:.4f})")
+        else:
+            no_improve_epochs += 1
+            if no_improve_epochs >= Config.PATIENCE:
+                logging.info(f"Early stopping after {no_improve_epochs} epochs without improvement")
+                break
+
+    logging.info("Testing model...")
+    test(model, test_loader, run_id)
+    cleanup_logging()
 
 if __name__ == "__main__":
     main()

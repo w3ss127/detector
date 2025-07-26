@@ -34,6 +34,8 @@ class Config:
     MIN_DELTA = 0.001  # Minimum MCC improvement for early stopping
     NUM_WORKERS = min(4, multiprocessing.cpu_count() // 2)
     IMAGE_SIZE = (224, 224)
+    TRAIN_IMAGES = 30000  # Total training images
+    TEST_IMAGES = 10000   # Total test images
 
 def setup_logging(log_dir, log_file):
     """Configure logging to file and console."""
@@ -66,7 +68,6 @@ def get_transforms(is_training=True):
     ]
     if is_training:
         transforms_list.append(transforms.RandomHorizontalFlip())
-    # No normalization to keep images in [0, 1]
     return transforms.Compose(transforms_list)
 
 class ResNetViTHybrid(nn.Module):
@@ -142,6 +143,13 @@ class LargeTensorDataset(Dataset):
         if not self.image_paths:
             logging.error(f"No valid images found in {base_dir}")
             raise ValueError(f"No valid images found in {base_dir}")
+
+        # Enforce exact number of images
+        expected_images = Config.TEST_IMAGES if self.is_test else Config.TRAIN_IMAGES
+        total_images = len(self.image_paths)
+        if total_images != expected_images:
+            logging.error(f"Expected {expected_images:,} images in {base_dir}, but found {total_images:,}")
+            raise ValueError(f"Expected {expected_images:,} images, found {total_images:,}")
 
         # Shuffle dataset
         indices = list(range(len(self.image_paths)))
@@ -315,11 +323,11 @@ def main():
     test_dataset = LargeTensorDataset(Config.TEST_DIR, transform=val_transform, is_test=True)
     test_loader = DataLoader(test_dataset, batch_size=Config.BATCH_SIZE, shuffle=False,
                              num_workers=Config.NUM_WORKERS, pin_memory=True, prefetch_factor=2, persistent_workers=True)
-    train_dataset = LargeTensorDataset(Config.TRAIN_DIR, transform=train_transform)
-    indices = list(range(len(train_dataset)))
+    train_dataset = LargeTensorDataset(Config.TRAIN_DIR, transform=train_transform, is_test=False)
+    indices = list(range(Config.TRAIN_IMAGES))
     np.random.seed(42)
     np.random.shuffle(indices)
-    train_size = int(0.8 * len(train_dataset))
+    train_size = int(0.8 * Config.TRAIN_IMAGES)
     train_indices, val_indices = indices[:train_size], indices[train_size:]
     train_subset = Subset(train_dataset, train_indices)
     val_subset = Subset(train_dataset, val_indices)
@@ -337,14 +345,14 @@ def main():
     scaler = GradScaler('cuda')
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5)
     best_mcc = -1.0
-    no_improvement_epochs = 0
+    no_improve_epochs = 0
     start_epoch = 0
 
     # Load checkpoint
     os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
-    latest_checkpoint = max(glob.glob(os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}*.pt")), key=os.path.getctime, default=None)
+    latest_checkpoint = max(glob.glob(os.path.join(Config.CHECKPOINT_DIR, f"model_{run_id}_*.pt")), key=os.path.getctime, default=None)
     if latest_checkpoint:
-        start_epoch, best_mcc, no_improvement_epochs, frozen汝, run_id = load_checkpoint(model, optimizer, scaler, latest_checkpoint)
+        start_epoch, best_mcc, no_improve_epochs, frozen, run_id = load_checkpoint(model, optimizer, scaler, latest_checkpoint)
         if frozen and start_epoch >= Config.FREEZE_EPOCHS:
             model.unfreeze_backbone()
             optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.FINETUNE_LR, weight_decay=0.0001)
@@ -377,7 +385,7 @@ def main():
                 'scaler_state': scaler.state_dict(),
                 'epoch': epoch + 1,
                 'best_mcc': best_mcc,
-                'no_improvement_epochs': no_improvement_epochs,
+                'no_improve_epochs': no_improve_epochs,
                 'frozen': not model.resnet.conv1.weight.requires_grad,
                 'run_id': run_id
             }
@@ -386,14 +394,14 @@ def main():
             logging.info(f"Saved checkpoint: {checkpoint_path}")
             if val_mcc > best_mcc + Config.MIN_DELTA:
                 best_mcc = val_mcc
-                no_improvement_epochs = 0
+                no_improve_epochs = 0
                 best_checkpoint_path = os.path.join(Config.CHECKPOINT_DIR, f"best_model_mcc_{best_mcc:.4f}_{run_id}.pt")
                 torch.save(checkpoint, best_checkpoint_path)
                 logging.info(f"Saved best model (MCC: {best_mcc:.4f})")
             else:
-                no_improvement_epochs += 1
-                if no_improvement_epochs >= Config.PATIENCE:
-                    logging.info(f"Early stopping after {no_improvement_epochs} epochs with no improvement")
+                no_improve_epochs += 1
+                if no_improve_epochs >= Config.PATIENCE:
+                    logging.info(f"Early stopping after {no_improve_epochs} epochs with no improvement")
                     break
     finally:
         logging.info("Testing model...")

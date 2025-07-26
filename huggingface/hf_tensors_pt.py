@@ -108,6 +108,15 @@ def parquet_to_pt_gpu(parquet_path, pt_path, gpu_id):
             torch.save(stacked_tensor_cpu, pt_path)
             print(f"GPU {gpu_id}: Saved tensor with shape: {stacked_tensor.shape} from {os.path.basename(parquet_path)}")
             
+            # Verification step: reload and check shape/dtype
+            try:
+                loaded_tensor = torch.load(pt_path, map_location='cpu')
+                print(f"GPU {gpu_id}: Verified {os.path.basename(pt_path)}: shape={tuple(loaded_tensor.shape)}, dtype={loaded_tensor.dtype}")
+                if loaded_tensor.shape[0] == 0 or loaded_tensor.shape[1:] != (3, 256, 256):
+                    print(f"GPU {gpu_id}: WARNING: {os.path.basename(pt_path)} has invalid shape: {tuple(loaded_tensor.shape)}")
+            except Exception as verify_error:
+                print(f"GPU {gpu_id}: ERROR verifying {os.path.basename(pt_path)}: {str(verify_error)}")
+            
             # Delete the parquet file after successful conversion
             try:
                 os.remove(parquet_path)
@@ -206,3 +215,16 @@ if __name__ == "__main__":
             print(f"📁 Processing file {i}/{len(parquet_files)}: {base}")
             parquet_to_pt_gpu(parquet_file, pt_path, 0)
         print(f"\n🎉 Completed conversion of all {len(parquet_files)} files!")
+
+    # After all conversions, print a summary of .pt files
+    print("\n📦 Summary of .pt files in output directory:")
+    pt_files = sorted(glob.glob(os.path.join(PT_DIR, "*.pt")))
+    if not pt_files:
+        print("❌ No .pt files found!")
+    else:
+        for pt_file in pt_files:
+            try:
+                tensor = torch.load(pt_file, map_location='cpu')
+                print(f"  {os.path.basename(pt_file)}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}")
+            except Exception as e:
+                print(f"  {os.path.basename(pt_file)}: ERROR loading file: {str(e)}")

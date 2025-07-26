@@ -20,18 +20,15 @@ SEED = 42
 torch.manual_seed(SEED)
 
 # ✅ Set which class subfolder to load
-TARGET_SUBFOLDER = "synthetic"  # <<< CHANGE THIS to "synthetic" or "semi-synthetic"
+TARGET_SUBFOLDER = "semi-synthetic"  # <<< CHANGE THIS to "synthetic" or "semi-synthetic"
 
 # ============ CHECK DEVICE ============
 print(f"🔧 Using device: {DEVICE}")
 
 # ============ TRANSFORMS ============
 test_transforms = transforms.Compose([
-    # transforms.Lambda(lambda x: x / 255.0),
+    transforms.Lambda(lambda x: x / 255.0),
     transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -58,10 +55,6 @@ class ResNetViTHybrid(nn.Module):
         self.dropout = nn.Dropout(0.5)
         self.fc2 = nn.Linear(512, num_classes)
 
-        for param in self.resnet.parameters():
-            param.requires_grad = False
-        for param in self.vit.parameters():
-            param.requires_grad = False
 
     def forward(self, x):
         res_feat = self.resnet(x)
@@ -72,7 +65,7 @@ class ResNetViTHybrid(nn.Module):
         return self.fc2(out)
 
 # ============ LOAD MODEL ============
-model_path = "best_model.pt"
+model_path = "./checkpoints/best_model_mcc_0.9709_45055d1d.pt"
 model = ResNetViTHybrid(NUM_CLASSES, resnet_variant=RESNET_VARIANT).to(DEVICE)
 
 if not os.path.exists(model_path):
@@ -158,9 +151,11 @@ with torch.no_grad():
         predictions.append(pred)
         if pred == label:
             correct += 1
-        # print(f"🖼️ Image {i+1}: Predicted → {CLASS_NAMES[pred]}, Probabilities → {[round(p, 4) for p in probs.squeeze().tolist()]}")
+        print(f"🖼️ Image {i+1}: Predicted → {CLASS_NAMES[pred]}, Probabilities → {[round(p, 4) for p in probs.squeeze().tolist()]}")
 
 # ============ ACCURACY ============
 accuracy = 100 * correct / len(test_labels)
 print(f"\n✅ Inference complete for '{TARGET_SUBFOLDER}'.")
 print(f"🎯 Accuracy: {accuracy:.2f}% ({correct}/{len(test_labels)})")
+
+
