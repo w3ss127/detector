@@ -829,7 +829,7 @@ def main():
     parser = argparse.ArgumentParser(description='Test Deepfake Detection Model')
     parser.add_argument('--test-path', type=str, default='datasets/test',
                        help='Path to test data directory containing real/semi-synthetic/synthetic subdirectories')
-    parser.add_argument('--checkpoint-path', type=str, default='checkpoints/best_model_staged.pth',
+    parser.add_argument('--checkpoint-path', type=str, default='checkpoints/model_stage1_epoch5_20250729_205930.pth',
                        help='Path to model checkpoint file')
     parser.add_argument('--batch-size', type=int, default=32,
                        help='Batch size for testing (default: 32)')

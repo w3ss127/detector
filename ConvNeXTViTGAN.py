@@ -61,7 +61,7 @@ class SuperiorConfig:
         
         # Training Configuration
         self.BATCH_SIZE = 28
-        self.EPOCHS = 40
+        self.EPOCHS = 50
         self.USE_AMP = True
         self.TRAIN_PATH = "datasets/train"
         self.IMAGE_SIZE = 224
@@ -70,8 +70,8 @@ class SuperiorConfig:
         
         # Progressive Training
         self.INITIAL_EPOCHS = 12
-        self.UNFREEZE_EPOCHS = [8, 18, 28]
-        self.FINE_TUNE_START_EPOCH = 15
+        self.UNFREEZE_EPOCHS = [5, 10, 15, 20, 50]  # Updated for specified schedule
+        self.FINE_TUNE_START_EPOCH = 20
         self.EARLY_STOPPING_PATIENCE = 8
         
         # Learning Rates
@@ -114,7 +114,7 @@ class SuperiorConfig:
         assert len(self.CLASS_NAMES) == self.NUM_CLASSES, "Class names must match NUM_CLASSES"
         assert self.CONVNEXT_BACKBONE in ["convnext_tiny", "convnext_small"], "Unsupported backbone"
         assert self.FINE_TUNE_START_EPOCH < self.EPOCHS, "Fine-tune start epoch must be less than total epochs"
-        assert all(epoch < self.EPOCHS for epoch in self.UNFREEZE_EPOCHS), "Unfreeze epochs must be within total epochs"
+        assert all(epoch <= self.EPOCHS for epoch in self.UNFREEZE_EPOCHS), "Unfreeze epochs must be within total epochs"
 
 class ForensicsAwareModule(nn.Module):
     """Advanced forensics module for detecting subtle synthesis artifacts"""
@@ -426,7 +426,7 @@ class SuperiorModel(nn.Module):
         self.attention_module = SuperiorAttentionModule(total_features, config)
         
         if config.USE_UNCERTAINTY_ESTIMATION:
-            self.uncertainty_module = UncertaintyModule(config.HIDDEN_DIM, config.NUM_CLASSES)
+            self.uncertainty_module = UncertaintyModule(config.HIDDEN_DIM // 4, config.NUM_CLASSES)
         
         self.fusion = nn.Sequential(
             nn.Linear(total_features, config.HIDDEN_DIM),
@@ -476,6 +476,23 @@ class SuperiorModel(nn.Module):
             for name, param in layers[-num_layers:]:
                 param.requires_grad = True
             logger.info(f"Unfrozen last {num_layers} ViT layers")
+    
+    def unfreeze_forensics_and_attention(self):
+        if self.config.USE_FORENSICS_MODULE:
+            for param in self.forensics_module.parameters():
+                param.requires_grad = True
+        for param in self.attention_module.parameters():
+            param.requires_grad = True
+        for param in self.fusion.parameters():
+            param.requires_grad = True
+        logger.info("Unfrozen forensics module, attention module, and fusion layers")
+    
+    def unfreeze_classifier(self):
+        for param in self.fusion.parameters():
+            param.requires_grad = True
+        for param in self.classifier.parameters():
+            param.requires_grad = True
+        logger.info("Unfrozen classifier and fusion layers")
     
     def get_trainable_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -928,46 +945,32 @@ def create_superior_optimizer(model, config, epoch):
     
     return optimizer
 
-def mixup_criterion(criterion, pred, y_a, y_b, lam, epoch=1):
-    if hasattr(pred, '__len__') and len(pred) == 3:
-        logits, features, (probs, epistemic_unc, aleatoric_unc, alpha) = pred
-        loss_a = criterion(logits, y_a, features, alpha, epoch)
-        loss_b = criterion(logits, y_b, features, alpha, epoch)
-    else:
-        logits, features = pred
-        loss_a = criterion(logits, y_a, features, None, epoch)
-        loss_b = criterion(logits, y_b, features, None, epoch)
-    
-    return lam * loss_a + (1 - lam) * loss_b
-
-def progressive_unfreeze_advanced(model, epoch, config, val_metrics, best_metrics):
+def progressive_unfreeze_advanced(model, epoch, config, val_metrics=None, best_metrics=None):
     unfroze_this_epoch = False
     
-    should_unfreeze = (
-        epoch in config.UNFREEZE_EPOCHS or 
-        (val_metrics and best_metrics and 
-         val_metrics.get('semi_synthetic_f1', 0) < best_metrics.get('semi_synthetic_f1', 0) - 0.03)
-    )
-    
-    if should_unfreeze:
-        unfreeze_stage = len([e for e in config.UNFREEZE_EPOCHS if e <= epoch]) + 1
+    if epoch in config.UNFREEZE_EPOCHS:
+        unfreeze_stage = config.UNFREEZE_EPOCHS.index(epoch) + 1
         
-        if unfreeze_stage == 1:
-            model.unfreeze_convnext_layers(30)
-            model.unfreeze_vit_layers(24)
-            logger.info("Unfreezing stage 1: Top layers")
-        elif unfreeze_stage == 2:
-            model.unfreeze_convnext_layers(60)
-            model.unfreeze_vit_layers(48)
-            logger.info("Unfreezing stage 2: More layers")
-        elif unfreeze_stage >= 3:
-            model.unfreeze_convnext_layers()
+        if unfreeze_stage == 1:  # Epoch 10
+            model.unfreeze_forensics_and_attention()
+            unfroze_this_epoch = True
+        elif unfreeze_stage == 2:  # Epoch 20
+            model.unfreeze_classifier()
+            unfroze_this_epoch = True
+        elif unfreeze_stage == 3:  # Epoch 30
             model.unfreeze_vit_layers()
-            logger.info("Unfreezing stage 3: All layers")
+            unfroze_this_epoch = True
+        elif unfreeze_stage == 4:  # Epoch 40
+            model.unfreeze_convnext_layers()
+            unfroze_this_epoch = True
+        elif unfreeze_stage == 5:  # Epoch 50
+            model.unfreeze_vit_layers()
+            model.unfreeze_convnext_layers()
+            unfroze_this_epoch = True
+            logger.info("Unfreezing stage 5: Ensured all layers are unfrozen")
         
         trainable_params = model.get_trainable_params()
-        logger.info(f"Progressive unfreezing: {trainable_params:,} trainable parameters")
-        unfroze_this_epoch = True
+        logger.info(f"Progressive unfreezing stage {unfreeze_stage}: {trainable_params:,} trainable parameters")
     
     return unfroze_this_epoch
 
@@ -1177,7 +1180,7 @@ def superior_train_worker(local_rank, config, master_port):
             model_for_unfreeze = model.module if config.DISTRIBUTED else model
             val_metrics = training_history.get('val_metrics', [None])[-1] if training_history else None
             unfroze_this_epoch = progressive_unfreeze_advanced(
-                model_for_unfreeze, epoch + 1, config, val_metrics, best_metrics
+                model_for_unfreeze, epoch + 1, config
             )
             
             if current_optimizer is None or unfroze_this_epoch or epoch == config.FINE_TUNE_START_EPOCH:
@@ -1452,7 +1455,7 @@ def main():
                         help='Disable spectral normalization')
     
     # Training arguments
-    parser.add_argument('--epochs', type=int, default=40,
+    parser.add_argument('--epochs', type=int, default=50,
                         help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=3e-4,
                         help='Initial learning rate for AdamW')
@@ -1462,7 +1465,7 @@ def main():
                         help='Weight decay')
     parser.add_argument('--fine_tune_start', type=int, default=15,
                         help='Epoch to start fine-tuning with SGD')
-    parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[8, 18, 28],
+    parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[5, 10, 15, 20, 25],
                         help='Epochs for progressive unfreezing')
     parser.add_argument('--early_stopping_patience', type=int, default=8,
                         help='Patience for early stopping')

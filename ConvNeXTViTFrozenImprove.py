@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler, random_split
 from torch.cuda.amp import GradScaler, autocast
 import torchvision.transforms as transforms
-from torchvision.models import convnext_tiny, convnext_small
+from torchvision.models import convnext_tiny
 import timm
 import os
 import numpy as np
@@ -39,14 +39,14 @@ class EnhancedConfig:
         self.NUM_CLASSES = 3
         self.HIDDEN_DIM = 1024
         self.DROPOUT_RATE = 0.3
-        self.FREEZE_BACKBONES = True  # Start with frozen backbones
+        self.FREEZE_BACKBONES = True
         self.ATTENTION_DROPOUT = 0.1
         self.USE_SPECTRAL_NORM = True
         self.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.DISTRIBUTED = torch.cuda.device_count() > 1
         self.BACKEND = "nccl"
         self.MASTER_ADDR = "localhost"
-        self.MASTER_PORT = "12355"
+        self.MASTER_PORT = "13355"
         self.BATCH_SIZE = 32
         self.EPOCHS = 50
         self.USE_AMP = True
@@ -54,40 +54,32 @@ class EnhancedConfig:
         self.IMAGE_SIZE = 224
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
-        
-        # Stage-specific learning rates
-        self.ADAMW_LR = 1e-3  # Stage 1 (frozen backbone)
-        self.SGD_LR = 1e-4    # Stages 2-5 (unfrozen backbone)
+        self.ADAMW_LR = 1e-3
+        self.SGD_LR = 1e-4
         self.SGD_MOMENTUM = 0.9
         self.SGD_WEIGHT_DECAY = 1e-4
-        
         self.WEIGHT_DECAY = 1e-2
         self.FOCAL_ALPHA = [1.0, 4.0, 2.0]
         self.FOCAL_GAMMA = 2.0
         self.LABEL_SMOOTHING = 0.1
-        self.CHECKPOINT_DIR = "checkpoints"
+        self.CHECKPOINT_DIR = "improved_checkpoints"
         self.CHECKPOINT_EVERY_N_EPOCHS = 5
-        
-        # MixUp and CutMix configuration
         self.USE_MIXUP = True
         self.USE_CUTMIX = True
         self.MIXUP_ALPHA = 0.2
         self.CUTMIX_ALPHA = 1.0
-        self.MIXUP_PROB = 0.5  # Probability of applying mixup
-        self.CUTMIX_PROB = 0.5  # Probability of applying cutmix
-        self.SWITCH_PROB = 0.5  # Probability of choosing cutmix over mixup when both are enabled
-        
-        # Training stages configuration
+        self.MIXUP_PROB = 0.5
+        self.CUTMIX_PROB = 0.5
+        self.SWITCH_PROB = 0.5
         self.TRAINING_STAGES = {
-            1: {'epochs': (1, 10), 'freeze_backbone': True, 'optimizer': 'adamw'},
-            2: {'epochs': (11, 20), 'freeze_backbone': True, 'optimizer': 'adamw'},
-            3: {'epochs': (21, 30), 'freeze_backbone': True, 'optimizer': 'adamw'},
-            4: {'epochs': (31, 40), 'freeze_backbone': False, 'optimizer': 'sgd'},
-            5: {'epochs': (41, 50), 'freeze_backbone': False, 'optimizer': 'sgd'}
+            1: {'epochs': (1, 5), 'freeze_backbone': 'full', 'optimizer': 'adamw'},
+            2: {'epochs': (6, 10), 'freeze_backbone': 'classifiers_only', 'optimizer': 'adamw'},
+            3: {'epochs': (11, 15), 'freeze_backbone': 'vit', 'optimizer': 'adamw'},
+            4: {'epochs': (16, 20), 'freeze_backbone': 'convnext', 'optimizer': 'sgd'},
+            5: {'epochs': (21, 50), 'freeze_backbone': 'none', 'optimizer': 'sgd'}
         }
 
     def get_current_stage(self, epoch):
-        """Get current training stage based on epoch number"""
         for stage, config in self.TRAINING_STAGES.items():
             start_epoch, end_epoch = config['epochs']
             if start_epoch <= epoch <= end_epoch:
@@ -99,7 +91,7 @@ class EnhancedConfig:
         assert isinstance(self.EPOCHS, int) and self.EPOCHS > 0, "Epochs must be positive"
         assert len(self.CLASS_NAMES) == self.NUM_CLASSES, "Class names must match NUM_CLASSES"
         assert self.CONVNEXT_BACKBONE in ["convnext_tiny", "convnext_small"], "Unsupported backbone"
-        assert isinstance(self.CHECKPOINT_EVERY_N_EPOCHS, int) and self.CHECKPOINT_EVERY_N_EPOCHS > 0, "Checkpoint frequency must be positive"
+        assert isinstance(self.CHECKPOINT_EVERY_N_EPOCHS, int) and self.CHECKPOINT_EVERY_N_EPOCHS > 0
         assert 0 <= self.MIXUP_PROB <= 1, "MIXUP_PROB must be between 0 and 1"
         assert 0 <= self.CUTMIX_PROB <= 1, "CUTMIX_PROB must be between 0 and 1"
         assert 0 <= self.SWITCH_PROB <= 1, "SWITCH_PROB must be between 0 and 1"
@@ -107,7 +99,6 @@ class EnhancedConfig:
         assert self.CUTMIX_ALPHA > 0, "CUTMIX_ALPHA must be positive"
 
 class MixUpCutMixCollator:
-    """Collator for applying MixUp and CutMix augmentations"""
     def __init__(self, config):
         self.config = config
         self.mixup_alpha = config.MIXUP_ALPHA
@@ -118,20 +109,15 @@ class MixUpCutMixCollator:
         self.num_classes = config.NUM_CLASSES
 
     def __call__(self, batch):
-        """Apply MixUp or CutMix to a batch"""
         images, targets = zip(*batch)
         images = torch.stack(images)
         targets = torch.tensor(targets, dtype=torch.long)
-        
-        # Convert targets to one-hot encoding
         targets_onehot = F.one_hot(targets, num_classes=self.num_classes).float()
         
-        # Decide whether to apply augmentation
         use_mixup = self.config.USE_MIXUP and np.random.rand() < self.mixup_prob
         use_cutmix = self.config.USE_CUTMIX and np.random.rand() < self.cutmix_prob
         
         if use_mixup and use_cutmix:
-            # Choose between mixup and cutmix
             if np.random.rand() < self.switch_prob:
                 return self._cutmix(images, targets_onehot)
             else:
@@ -144,71 +130,34 @@ class MixUpCutMixCollator:
             return images, targets_onehot
 
     def _mixup(self, images, targets):
-        """Apply MixUp augmentation"""
         batch_size = images.size(0)
-        
-        # Sample lambda from Beta distribution
-        if self.mixup_alpha > 0:
-            lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
-        else:
-            lam = 1
-        
-        # Generate random permutation
+        lam = np.random.beta(self.mixup_alpha, self.mixup_alpha) if self.mixup_alpha > 0 else 1
         index = torch.randperm(batch_size)
-        
-        # Mix images
         mixed_images = lam * images + (1 - lam) * images[index]
-        
-        # Mix targets
         mixed_targets = lam * targets + (1 - lam) * targets[index]
-        
         return mixed_images, mixed_targets
 
     def _cutmix(self, images, targets):
-        """Apply CutMix augmentation"""
         batch_size = images.size(0)
-        
-        # Sample lambda from Beta distribution
-        if self.cutmix_alpha > 0:
-            lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha)
-        else:
-            lam = 1
-        
-        # Generate random permutation
+        lam = np.random.beta(self.cutmix_alpha, self.cutmix_alpha) if self.cutmix_alpha > 0 else 1
         index = torch.randperm(batch_size)
-        
-        # Get image dimensions
         _, _, h, w = images.shape
-        
-        # Generate random bounding box
         cut_rat = np.sqrt(1. - lam)
         cut_w = int(w * cut_rat)
         cut_h = int(h * cut_rat)
-        
-        # Random center point
         cx = np.random.randint(w)
         cy = np.random.randint(h)
-        
-        # Bounding box coordinates
         bbx1 = np.clip(cx - cut_w // 2, 0, w)
         bby1 = np.clip(cy - cut_h // 2, 0, h)
         bbx2 = np.clip(cx + cut_w // 2, 0, w)
         bby2 = np.clip(cy + cut_h // 2, 0, h)
-        
-        # Apply cutmix
         mixed_images = images.clone()
         mixed_images[:, :, bby1:bby2, bbx1:bbx2] = images[index, :, bby1:bby2, bbx1:bbx2]
-        
-        # Adjust lambda based on actual cut area
         lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (w * h))
-        
-        # Mix targets
         mixed_targets = lam * targets + (1 - lam) * targets[index]
-        
         return mixed_images, mixed_targets
 
 class AdvancedLoss(nn.Module):
-    """Loss function with focal loss and support for soft targets"""
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -217,30 +166,23 @@ class AdvancedLoss(nn.Module):
         self.label_smoothing = config.LABEL_SMOOTHING
 
     def focal_loss(self, inputs, targets):
-        """Focal loss with support for soft targets"""
         if targets.dim() == 1:
-            # Hard targets
             ce_loss = F.cross_entropy(inputs, targets, reduction='none', label_smoothing=self.label_smoothing)
             pt = torch.exp(-ce_loss)
             alpha_t = self.focal_alpha[targets]
             return (alpha_t * (1 - pt) ** self.focal_gamma * ce_loss).mean()
         else:
-            # Soft targets (from MixUp/CutMix)
             log_probs = F.log_softmax(inputs, dim=1)
             ce_loss = -(targets * log_probs).sum(dim=1)
-            
-            # For soft targets, use average alpha
             probs = F.softmax(inputs, dim=1)
             pt = (targets * probs).sum(dim=1)
             alpha_t = (targets * self.focal_alpha.unsqueeze(0)).sum(dim=1)
-            
             return (alpha_t * (1 - pt) ** self.focal_gamma * ce_loss).mean()
 
     def forward(self, inputs, targets):
         return self.focal_loss(inputs, targets)
 
 class SpectralNorm(nn.Module):
-    """Spectral normalization for regularization"""
     def __init__(self, module, name='weight', power_iterations=1):
         super().__init__()
         self.module = module
@@ -297,7 +239,6 @@ class SpectralNorm(nn.Module):
         return self.module.forward(*args)
 
 class EnhancedAttentionModule(nn.Module):
-    """Attention module with channel and spatial attention"""
     def __init__(self, channels, reduction=16, config=None):
         super().__init__()
         self.config = config or EnhancedConfig()
@@ -332,73 +273,87 @@ class EnhancedAttentionModule(nn.Module):
         return x_final.view(x_final.size(0), x_final.size(1))
 
 class EnhancedConvNextViTModel(nn.Module):
-    """Hybrid ConvNeXt and ViT model with attention"""
     def __init__(self, config):
         super().__init__()
         self.config = config
-        if config.CONVNEXT_BACKBONE == 'convnext_tiny':
-            self.convnext = convnext_tiny(weights=config.PRETRAINED_WEIGHTS)
-        elif config.CONVNEXT_BACKBONE == 'convnext_small':
-            self.convnext = convnext_small(weights=config.PRETRAINED_WEIGHTS)
-        else:
-            raise ValueError(f"Unsupported ConvNeXt backbone: {config.CONVNEXT_BACKBONE}")
-        
+        self.convnext = convnext_tiny(weights=config.PRETRAINED_WEIGHTS)
         self.vit = timm.create_model('vit_base_patch16_224', pretrained=config.PRETRAINED_WEIGHTS is not None, num_classes=0)
         
-        for module in self.convnext.classifier:
-            if isinstance(module, nn.Linear):
-                convnext_features = module.in_features
-                break
-        else:
-            raise AttributeError("No Linear layer found in ConvNeXt classifier")
+        self.convnext_feature_params = [p for n, p in self.convnext.named_parameters() if 'classifier' not in n]
+        self.convnext_classifier_params = list(self.convnext.classifier.parameters())
+        self.vit_feature_params = [p for n, p in self.vit.named_parameters() if 'head' not in n]
+        self.vit_classifier_params = list(self.vit.head.parameters()) if hasattr(self.vit, 'head') else []
+        self.backbone_params = self.convnext_feature_params + self.convnext_classifier_params + \
+                              self.vit_feature_params + self.vit_classifier_params
         
-        vit_features = self.vit.num_features
-        
-        # Store backbone parameters for freezing/unfreezing
-        self.backbone_params = list(self.convnext.parameters()) + list(self.vit.parameters())
-        
-        # Initialize with frozen backbones if specified
         if config.FREEZE_BACKBONES:
             self.freeze_backbones()
         
-        self.attention_module = EnhancedAttentionModule(channels=convnext_features + vit_features, config=config)
+        # Feature dimensions
+        self.convnext_dim = 768  # convnext_tiny output dimension
+        self.vit_dim = 768       # vit_base_patch16_224 output dimension
+        
+        # Attention modules
+        self.convnext_attention = EnhancedAttentionModule(self.convnext_dim, config=config)
+        self.vit_attention = EnhancedAttentionModule(self.vit_dim, config=config)
+        
+        # Fusion layer
         self.fusion = nn.Sequential(
-            nn.Linear(convnext_features + vit_features, config.HIDDEN_DIM),
-            nn.GELU(),
+            nn.Linear(self.convnext_dim + self.vit_dim, config.HIDDEN_DIM),
+            nn.ReLU(),
             nn.Dropout(config.DROPOUT_RATE),
             nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)
         )
+        
         if config.USE_SPECTRAL_NORM:
-            self.fusion[0] = nn.utils.spectral_norm(self.fusion[0])
-            self.fusion[3] = nn.utils.spectral_norm(self.fusion[3])
+            self.fusion[0] = SpectralNorm(self.fusion[0])
+            self.fusion[3] = SpectralNorm(self.fusion[3])
 
     def freeze_backbones(self):
-        """Freeze backbone parameters"""
         for param in self.backbone_params:
             param.requires_grad = False
-        logger.info("Backbones frozen")
+        logger.info("All backbones frozen")
+
+    def unfreeze_classifiers(self):
+        self.freeze_backbones()
+        for param in self.convnext_classifier_params + self.vit_classifier_params:
+            param.requires_grad = True
+        logger.info("ConvNeXt and ViT classifiers unfrozen")
+
+    def unfreeze_vit(self):
+        self.freeze_backbones()
+        for param in self.vit_feature_params + self.vit_classifier_params:
+            param.requires_grad = True
+        for param in self.convnext_classifier_params:
+            param.requires_grad = True
+        logger.info("ViT backbone and classifiers unfrozen, ConvNeXt features remain frozen")
+
+    def unfreeze_convnext(self):
+        for param in self.convnext_feature_params + self.convnext_classifier_params + \
+                    self.vit_feature_params + self.vit_classifier_params:
+            param.requires_grad = True
+        logger.info("ConvNeXt and ViT backbones fully unfrozen")
 
     def unfreeze_backbones(self):
-        """Unfreeze backbone parameters"""
         for param in self.backbone_params:
             param.requires_grad = True
-        logger.info("Backbones unfrozen")
+        logger.info("All backbones unfrozen")
 
     def forward(self, x):
-        convnext_feats = self.convnext.features(x)
-        convnext_feats = self.convnext.avgpool(convnext_feats)
-        convnext_feats = torch.flatten(convnext_feats, 1)
+        # Extract features
+        convnext_features = self.convnext(x)
+        vit_features = self.vit(x)
         
-        vit_feats = self.vit.forward_features(x)
-        vit_feats = vit_feats[:, 0]
+        # Apply attention
+        convnext_att = self.convnext_attention(convnext_features)
+        vit_att = self.vit_attention(vit_features)
         
-        fused_features = torch.cat([convnext_feats, vit_feats], dim=1)
-        fused_features = self.attention_module(fused_features)
-        logits = self.fusion(fused_features)
-        return logits
+        # Fusion
+        combined_features = torch.cat([convnext_att, vit_att], dim=1)
+        output = self.fusion(combined_features)
+        return output
 
 class EnhancedCustomDatasetPT(Dataset):
-    """Dataset for loading .pt files"""
     def __init__(self, root_dir, config, transform=None):
         self.root_dir = Path(root_dir)
         self.config = config
@@ -454,7 +409,6 @@ class EnhancedCustomDatasetPT(Dataset):
             return torch.zeros(3, self.config.IMAGE_SIZE, self.config.IMAGE_SIZE), 0
 
 class EnhancedDataAugmentation:
-    """Data augmentation preserving forensic artifacts"""
     def __init__(self, config, is_training=True):
         self.config = config
         self.is_training = is_training
@@ -474,7 +428,6 @@ class EnhancedDataAugmentation:
         ])
 
 def create_enhanced_data_loaders(config, local_rank=-1):
-    """Create data loaders with MixUp/CutMix support"""
     dataset = EnhancedCustomDatasetPT(
         root_dir=config.TRAIN_PATH,
         transform=EnhancedDataAugmentation(config, is_training=True).get_train_transforms(),
@@ -489,29 +442,25 @@ def create_enhanced_data_loaders(config, local_rank=-1):
     val_dataset.dataset.transform = EnhancedDataAugmentation(config, is_training=False).get_train_transforms()
     test_dataset.dataset.transform = EnhancedDataAugmentation(config, is_training=False).get_train_transforms()
     
-    # Create MixUp/CutMix collator for training
     mixup_cutmix_collator = MixUpCutMixCollator(config)
     
     train_sampler = DistributedSampler(train_dataset, rank=local_rank, shuffle=True) if config.DISTRIBUTED else None
     train_loader = DataLoader(
         train_dataset, batch_size=config.BATCH_SIZE, shuffle=(train_sampler is None),
         sampler=train_sampler, num_workers=config.NUM_WORKERS, pin_memory=True,
-        collate_fn=mixup_cutmix_collator  # Apply MixUp/CutMix
+        collate_fn=mixup_cutmix_collator
     )
     val_loader = DataLoader(
         val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
         num_workers=config.NUM_WORKERS, pin_memory=True
-        # No collate_fn for validation - use standard targets
     )
     test_loader = DataLoader(
         test_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
         num_workers=config.NUM_WORKERS, pin_memory=True
-        # No collate_fn for testing - use standard targets
     )
     return train_loader, val_loader, test_loader
 
-def find_free_port(start_port=12355, max_attempts=100):
-    """Find an available port"""
+def find_free_port(start_port=13355, max_attempts=100):
     port = start_port
     for _ in range(max_attempts):
         try:
@@ -525,8 +474,7 @@ def find_free_port(start_port=12355, max_attempts=100):
             raise
     raise RuntimeError(f"No free port found after {max_attempts} attempts")
 
-def setup_distributed(local_rank, world_size, backend='nccl', master_addr='localhost', master_port='12355'):
-    """Initialize distributed training"""
+def setup_distributed(local_rank, world_size, backend='nccl', master_addr='localhost', master_port='13355'):
     port = find_free_port(int(master_port))
     if port != int(master_port):
         logger.info(f"Port {master_port} in use, using {port}")
@@ -537,7 +485,6 @@ def setup_distributed(local_rank, world_size, backend='nccl', master_addr='local
     logger.info(f"Distributed process group initialized for rank {local_rank} on port {port}")
 
 def cleanup_distributed():
-    """Clean up distributed process group"""
     try:
         if dist.is_initialized():
             dist.barrier()
@@ -551,7 +498,6 @@ def cleanup_distributed():
     gc.collect()
 
 def create_optimizer(model, config, optimizer_type='adamw'):
-    """Create optimizer based on type"""
     if optimizer_type == 'adamw':
         return optim.AdamW(
             model.parameters(), 
@@ -568,53 +514,72 @@ def create_optimizer(model, config, optimizer_type='adamw'):
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
 
-def train_model(config):
-    """Main training function with staged training"""
-    local_rank = -1
-    if config.DISTRIBUTED:
-        try:
-            if not all(os.environ.get(var) for var in ['RANK', 'WORLD_SIZE']):
-                logger.warning("Distributed training enabled but RANK/WORLD_SIZE not set. Falling back to single-GPU.")
-                config.DISTRIBUTED = False
-            else:
-                local_rank = int(os.environ['LOCAL_RANK'])
-                setup_distributed(local_rank, int(os.environ['WORLD_SIZE']), config.BACKEND, 
-                               config.MASTER_ADDR, config.MASTER_PORT)
-                config.DEVICE = torch.device(f'cuda:{local_rank}')
-        except Exception as e:
-            logger.error(f"Distributed training failed: {e}. Falling back to single-GPU.")
-            config.DISTRIBUTED = False
-
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
+def evaluate_model(model, data_loader, criterion, config, phase='val'):
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_labels = []
     
-    # Create checkpoint directory
-    os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
-    best_model_path = os.path.join(config.CHECKPOINT_DIR, "best_model_staged.pth")
+    with torch.no_grad():
+        for images, targets in tqdm(data_loader, desc=f"{phase} Progress"):
+            images = images.to(config.DEVICE)
+            if targets.dim() > 1:  # Convert soft targets to hard targets for evaluation
+                targets = torch.argmax(targets, dim=1)
+            targets = targets.to(config.DEVICE)
+            
+            with autocast(enabled=config.USE_AMP):
+                outputs = model(images)
+                loss = criterion(outputs, targets)
+            
+            running_loss += loss.item() * images.size(0)
+            _, predicted = torch.max(outputs, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(targets.cpu().numpy())
+    
+    epoch_loss = running_loss / len(data_loader.dataset)
+    epoch_acc = 100 * correct / total
+    cm = confusion_matrix(all_labels, all_preds)
+    report = classification_report(all_labels, all_preds, target_names=config.CLASS_NAMES, output_dict=True)
+    
+    return epoch_loss, epoch_acc, cm, report
+
+def train_model(local_rank, config, resume_from=None):
+    if config.DISTRIBUTED:
+        world_size = torch.cuda.device_count()
+        setup_distributed(local_rank, world_size, config.BACKEND, config.MASTER_ADDR, config.MASTER_PORT)
     
     train_loader, val_loader, test_loader = create_enhanced_data_loaders(config, local_rank)
+    
     model = EnhancedConvNextViTModel(config).to(config.DEVICE)
     if config.DISTRIBUTED:
         model = DDP(model, device_ids=[local_rank])
     
-    criterion = AdvancedLoss(config).to(config.DEVICE)
+    criterion = AdvancedLoss(config)
     scaler = GradScaler(enabled=config.USE_AMP)
     
-    # Initialize variables for checkpointing
     best_val_acc = 0.0
     current_stage = 1
     current_optimizer_type = 'adamw'
     optimizer = create_optimizer(model, config, current_optimizer_type)
     
-    logger.info(f"Starting training with {config.EPOCHS} epochs in 5 stages")
-    logger.info(f"Stage 1 (epochs 1-10): Frozen backbone + AdamW")
-    logger.info(f"Stages 2-5 (epochs 11-50): Unfrozen backbone + SGD")
+    if resume_from:
+        epoch, current_stage, best_val_acc, config.FREEZE_BACKBONES, current_optimizer_type = load_staged_checkpoint(
+            model, optimizer, resume_from, config
+        )
+        logger.info(f"Resumed training from epoch {epoch}")
+    else:
+        epoch = 0
     
-    for epoch in range(config.EPOCHS):
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    
+    logger.info(f"Starting training with {config.EPOCHS} epochs in 5 stages")
+    for epoch in range(epoch, config.EPOCHS):
         epoch_num = epoch + 1
-        
-        # Check if we need to transition to a new stage
         stage_num, stage_config = config.get_current_stage(epoch_num)
         
         if stage_num != current_stage:
@@ -623,218 +588,112 @@ def train_model(config):
             logger.info(f"{'='*60}")
             
             current_stage = stage_num
-            
-            # Handle backbone freezing/unfreezing
             model_to_modify = model.module if isinstance(model, DDP) else model
-            if stage_config['freeze_backbone'] and not config.FREEZE_BACKBONES:
+            
+            if stage_config['freeze_backbone'] == 'full':
                 model_to_modify.freeze_backbones()
                 config.FREEZE_BACKBONES = True
-            elif not stage_config['freeze_backbone'] and config.FREEZE_BACKBONES:
+            elif stage_config['freeze_backbone'] == 'classifiers_only':
+                model_to_modify.unfreeze_classifiers()
+                config.FREEZE_BACKBONES = True
+            elif stage_config['freeze_backbone'] == 'vit':
+                model_to_modify.unfreeze_vit()
+                config.FREEZE_BACKBONES = True
+            elif stage_config['freeze_backbone'] == 'convnext':
+                model_to_modify.unfreeze_convnext()
+                config.FREEZE_BACKBONES = False
+            elif stage_config['freeze_backbone'] == 'none':
                 model_to_modify.unfreeze_backbones()
                 config.FREEZE_BACKBONES = False
             
-            # Handle optimizer switching
             if stage_config['optimizer'] != current_optimizer_type:
                 current_optimizer_type = stage_config['optimizer']
-                logger.info(f"Switching to {current_optimizer_type.upper()} optimizer")
-                
-                # Create new optimizer
                 optimizer = create_optimizer(model, config, current_optimizer_type)
-                
-                # Recreate scaler for new optimizer
                 scaler = GradScaler(enabled=config.USE_AMP)
             
             logger.info(f"Stage {stage_num} configuration:")
-            logger.info(f"  - Backbone frozen: {stage_config['freeze_backbone']}")
-            logger.info(f"  - Optimizer: {stage_config['optimizer'].upper()}")
-            if stage_config['optimizer'] == 'adamw':
-                logger.info(f"  - Learning rate: {config.ADAMW_LR}")
-            else:
-                logger.info(f"  - Learning rate: {config.SGD_LR}")
-                logger.info(f"  - Momentum: {config.SGD_MOMENTUM}")
+            logger.info(f"  - Backbone freeze state: {stage_config['freeze_backbone']}")
+            logger.info(f"  - Optimizer: {current_optimizer_type.upper()}")
         
-        # Training phase
         model.train()
-        train_loss = 0
-        train_correct = 0
-        train_total = 0
+        train_sampler = train_loader.sampler if isinstance(train_loader.sampler, DistributedSampler) else None
+        if train_sampler:
+            train_sampler.set_epoch(epoch)
         
-        pbar = tqdm(train_loader, desc=f'Stage {stage_num}, Epoch {epoch_num}/{config.EPOCHS}')
-        for batch_idx, (data, target) in enumerate(pbar):
-            data, target = data.to(config.DEVICE), target.to(config.DEVICE)
-            optimizer.zero_grad()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        
+        for images, targets in tqdm(train_loader, desc=f"Epoch {epoch_num}/{config.EPOCHS}"):
+            images = images.to(config.DEVICE)
+            targets = targets.to(config.DEVICE)
             
+            optimizer.zero_grad()
             with autocast(enabled=config.USE_AMP):
-                output = model(data)
-                loss = criterion(output, target)
+                outputs = model(images)
+                loss = criterion(outputs, targets)
             
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
             
-            # Update training metrics
-            train_loss += loss.item()
-            
-            # Handle both soft and hard targets for accuracy calculation
-            if target.dim() == 1:
-                # Hard targets (no MixUp/CutMix applied)
-                pred = output.argmax(dim=1)
-                train_correct += pred.eq(target).sum().item()
-            else:
-                # Soft targets (MixUp/CutMix applied)
-                # Use the class with highest probability in soft target
-                target_hard = target.argmax(dim=1)
-                pred = output.argmax(dim=1)
-                train_correct += pred.eq(target_hard).sum().item()
-            
-            train_total += target.size(0)
-            
-            # Update progress bar
-            train_acc = train_correct / train_total
-            augmentation_info = ""
-            if config.USE_MIXUP and config.USE_CUTMIX:
-                augmentation_info = "Mix+Cut"
-            elif config.USE_MIXUP:
-                augmentation_info = "MixUp"
-            elif config.USE_CUTMIX:
-                augmentation_info = "CutMix"
-            
-            pbar.set_postfix({
-                'Loss': f'{train_loss/(batch_idx+1):.4f}',
-                'Acc': f'{train_acc:.4f}',
-                'Opt': current_optimizer_type.upper(),
-                'Aug': augmentation_info
-            })
+            running_loss += loss.item() * images.size(0)
+            if targets.dim() > 1:  # Handle soft targets
+                targets = torch.argmax(targets, dim=1)
+            _, predicted = torch.max(outputs, 1)
+            total += targets.size(0)
+            correct += (predicted == targets).sum().item()
         
-        # Validation phase
-        model.eval()
-        with torch.no_grad():
-            val_loss = 0
-            correct = 0
-            total = 0
-            for data, target in val_loader:
-                data, target = data.to(config.DEVICE), target.to(config.DEVICE)
-                output = model(data)
-                val_loss += criterion(output, target).item()
-                pred = output.argmax(dim=1)
-                correct += pred.eq(target).sum().item()
-                total += target.size(0)
-            
-            val_loss /= len(val_loader)
-            val_acc = correct / total
-            train_loss /= len(train_loader)
-            train_acc = train_correct / train_total
-            
-            logger.info(f"Stage {stage_num}, Epoch {epoch_num}: "
-                       f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                       f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-            
-            # Save best model based on validation accuracy
-            if config.DISTRIBUTED:
-                if local_rank == 0 and val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    model_to_save = model.module if isinstance(model, DDP) else model
-                    torch.save({
-                        'model_state_dict': model_to_save.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'epoch': epoch + 1,
-                        'stage': stage_num,
-                        'val_acc': val_acc,
-                        'train_acc': train_acc,
-                        'backbone_frozen': config.FREEZE_BACKBONES,
-                        'optimizer_type': current_optimizer_type
-                    }, best_model_path)
-                    logger.info(f"Saved best model with Val Acc: {best_val_acc:.4f} at {best_model_path}")
-            else:
-                if val_acc > best_val_acc:
-                    best_val_acc = val_acc
-                    torch.save({
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'epoch': epoch + 1,
-                        'stage': stage_num,
-                        'val_acc': val_acc,
-                        'train_acc': train_acc,
-                        'backbone_frozen': config.FREEZE_BACKBONES,
-                        'optimizer_type': current_optimizer_type
-                    }, best_model_path)
-                    logger.info(f"Saved best model with Val Acc: {best_val_acc:.4f} at {best_model_path}")
-            
-            # Save periodic checkpoint
-            if (epoch + 1) % config.CHECKPOINT_EVERY_N_EPOCHS == 0:
-                timestamp = time.strftime('%Y%m%d_%H%M%S')
-                periodic_path = os.path.join(config.CHECKPOINT_DIR, f"model_stage{stage_num}_epoch{epoch+1}_{timestamp}.pth")
-                if config.DISTRIBUTED:
-                    if local_rank == 0:
-                        model_to_save = model.module if isinstance(model, DDP) else model
-                        torch.save({
-                            'model_state_dict': model_to_save.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'epoch': epoch + 1,
-                            'stage': stage_num,
-                            'val_acc': val_acc,
-                            'train_acc': train_acc,
-                            'backbone_frozen': config.FREEZE_BACKBONES,
-                            'optimizer_type': current_optimizer_type
-                        }, periodic_path)
-                        logger.info(f"Saved periodic checkpoint at {periodic_path}")
-                else:
-                    torch.save({
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'epoch': epoch + 1,
-                        'stage': stage_num,
-                        'val_acc': val_acc,
-                        'train_acc': train_acc,
-                        'backbone_frozen': config.FREEZE_BACKBONES,
-                        'optimizer_type': current_optimizer_type
-                    }, periodic_path)
-                    logger.info(f"Saved periodic checkpoint at {periodic_path}")
-    
-    # Save final model
-    final_model_path = os.path.join(config.CHECKPOINT_DIR, f"final_model_staged_{time.strftime('%Y%m%d_%H%M%S')}.pth")
-    if config.DISTRIBUTED:
-        if local_rank == 0:
-            model_to_save = model.module if isinstance(model, DDP) else model
-            torch.save({
-                'model_state_dict': model_to_save.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'epoch': config.EPOCHS,
-                'stage': 5,
-                'val_acc': val_acc,
-                'train_acc': train_acc,
-                'backbone_frozen': config.FREEZE_BACKBONES,
-                'optimizer_type': current_optimizer_type
-            }, final_model_path)
-            logger.info(f"Saved final model at {final_model_path}")
-    else:
-        torch.save({
-            'model_state_dict': model.state_dict(),
+        train_loss = running_loss / len(train_loader.dataset)
+        train_acc = 100 * correct / total
+        
+        val_loss, val_acc, val_cm, val_report = evaluate_model(model, val_loader, criterion, config, phase='val')
+        
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        
+        logger.info(f"Epoch {epoch_num}/{config.EPOCHS}")
+        logger.info(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
+        logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
+        
+        os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
+        model_to_save = model.module if isinstance(model, DDP) else model
+        checkpoint = {
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'epoch': config.EPOCHS,
-            'stage': 5,
+            'epoch': epoch + 1,
+            'stage': stage_num,
             'val_acc': val_acc,
             'train_acc': train_acc,
             'backbone_frozen': config.FREEZE_BACKBONES,
-            'optimizer_type': current_optimizer_type
-        }, final_model_path)
-        logger.info(f"Saved final model at {final_model_path}")
+            'optimizer_type': current_optimizer_type,
+            'freeze_state': stage_config['freeze_backbone']
+        }
+        
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(checkpoint, os.path.join(config.CHECKPOINT_DIR, 'best_model.pth'))
+            logger.info("Saved best model checkpoint")
+        
+        if epoch_num % config.CHECKPOINT_EVERY_N_EPOCHS == 0:
+            torch.save(checkpoint, os.path.join(config.CHECKPOINT_DIR, f'checkpoint_epoch_{epoch_num}.pth'))
+            logger.info(f"Saved checkpoint for epoch {epoch_num}")
     
-    # Print training summary
-    logger.info(f"\n{'='*60}")
-    logger.info("TRAINING COMPLETED")
-    logger.info(f"{'='*60}")
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f}")
-    logger.info(f"Final validation accuracy: {val_acc:.4f}")
-    logger.info(f"Best model saved at: {best_model_path}")
-    logger.info(f"Final model saved at: {final_model_path}")
-    logger.info(f"{'='*60}")
+    test_loss, test_acc, test_cm, test_report = evaluate_model(model, test_loader, criterion, config, phase='test')
+    logger.info(f"Final Test Results:")
+    logger.info(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%")
+    logger.info(f"Test Classification Report:\n{test_report}")
     
-    cleanup_distributed()
-    return {}, model
-
+    torch.save(checkpoint, os.path.join(config.CHECKPOINT_DIR, 'final_model.pth'))
+    logger.info("Saved final model checkpoint")
+    
+    if config.DISTRIBUTED:
+        cleanup_distributed()
+    
+    return history, model
 def load_staged_checkpoint(model, optimizer, checkpoint_path, config):
-    """Load a staged training checkpoint"""
     checkpoint = torch.load(checkpoint_path, map_location=config.DEVICE)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -844,38 +703,45 @@ def load_staged_checkpoint(model, optimizer, checkpoint_path, config):
     val_acc = checkpoint['val_acc']
     train_acc = checkpoint.get('train_acc', 0.0)
     backbone_frozen = checkpoint.get('backbone_frozen', True)
+    freeze_state = checkpoint.get('freeze_state', 'full')
     optimizer_type = checkpoint.get('optimizer_type', 'adamw')
     
-    logger.info(f"Loaded checkpoint from epoch {epoch}, stage {stage}")
-    logger.info(f"  - Validation accuracy: {val_acc:.4f}")
-    logger.info(f"  - Training accuracy: {train_acc:.4f}")
-    logger.info(f"  - Backbone frozen: {backbone_frozen}")
-    logger.info(f"  - Optimizer type: {optimizer_type}")
+    model_to_modify = model.module if isinstance(model, DDP) else model
+    if freeze_state == 'full':
+        model_to_modify.freeze_backbones()
+        config.FREEZE_BACKBONES = True
+    elif freeze_state == 'classifiers_only':
+        model_to_modify.unfreeze_classifiers()
+        config.FREEZE_BACKBONES = True
+    elif freeze_state == 'vit':
+        model_to_modify.unfreeze_vit()
+        config.FREEZE_BACKBONES = True
+    elif freeze_state in ['convnext', 'none']:
+        model_to_modify.unfreeze_convnext()
+        config.FREEZE_BACKBONES = False
     
+    logger.info(f"Loaded checkpoint from epoch {epoch}, stage {stage}")
     return epoch, stage, val_acc, backbone_frozen, optimizer_type
 
 def main():
-    """Main function with argument parsing"""
     parser = argparse.ArgumentParser(description='Staged Deepfake Detection Training with MixUp/CutMix')
     parser.add_argument('--data-path', type=str, default='datasets/train')
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--adamw-lr', type=float, default=1e-3, help='Learning rate for AdamW (Stage 1)')
-    parser.add_argument('--sgd-lr', type=float, default=1e-4, help='Learning rate for SGD (Stages 2-5)')
-    parser.add_argument('--sgd-momentum', type=float, default=0.9, help='Momentum for SGD')
+    parser.add_argument('--adamw-lr', type=float, default=1e-3)
+    parser.add_argument('--sgd-lr', type=float, default=1e-4)
+    parser.add_argument('--sgd-momentum', type=float, default=0.9)
     parser.add_argument('--no-distributed', action='store_true')
-    parser.add_argument('--checkpoint-dir', type=str, default='checkpoints')
+    parser.add_argument('--checkpoint-dir', type=str, default='improved_checkpoints')
     parser.add_argument('--checkpoint-every-n-epochs', type=int, default=5)
-    parser.add_argument('--resume-from', type=str, default=None, help='Path to checkpoint to resume from')
-    
-    # MixUp and CutMix arguments
-    parser.add_argument('--no-mixup', action='store_true', help='Disable MixUp augmentation')
-    parser.add_argument('--no-cutmix', action='store_true', help='Disable CutMix augmentation')
-    parser.add_argument('--mixup-alpha', type=float, default=0.2, help='MixUp alpha parameter')
-    parser.add_argument('--cutmix-alpha', type=float, default=1.0, help='CutMix alpha parameter')
-    parser.add_argument('--mixup-prob', type=float, default=0.5, help='Probability of applying MixUp')
-    parser.add_argument('--cutmix-prob', type=float, default=0.5, help='Probability of applying CutMix')
-    parser.add_argument('--switch-prob', type=float, default=0.5, help='Probability of choosing CutMix over MixUp')
+    parser.add_argument('--resume-from', type=str, default=None)
+    parser.add_argument('--no-mixup', action='store_true')
+    parser.add_argument('--no-cutmix', action='store_true')
+    parser.add_argument('--mixup-alpha', type=float, default=0.2)
+    parser.add_argument('--cutmix-alpha', type=float, default=1.0)
+    parser.add_argument('--mixup-prob', type=float, default=0.5)
+    parser.add_argument('--cutmix-prob', type=float, default=0.5)
+    parser.add_argument('--switch-prob', type=float, default=0.5)
     
     args = parser.parse_args()
     
@@ -886,11 +752,9 @@ def main():
     config.ADAMW_LR = args.adamw_lr
     config.SGD_LR = args.sgd_lr
     config.SGD_MOMENTUM = args.sgd_momentum
-    config.DISTRIBUTED = not args.no_distributed
+    config.DISTRIBUTED = not args.no_distributed and torch.cuda.device_count() > 1
     config.CHECKPOINT_DIR = args.checkpoint_dir
     config.CHECKPOINT_EVERY_N_EPOCHS = args.checkpoint_every_n_epochs
-    
-    # MixUp and CutMix configuration
     config.USE_MIXUP = not args.no_mixup
     config.USE_CUTMIX = not args.no_cutmix
     config.MIXUP_ALPHA = args.mixup_alpha
@@ -906,7 +770,6 @@ def main():
     logger.info(f"  - Stage 1 (epochs 1-10): Frozen backbone + AdamW (lr={config.ADAMW_LR})")
     logger.info(f"  - Stages 2-5 (epochs 11-50): Unfrozen backbone + SGD (lr={config.SGD_LR}, momentum={config.SGD_MOMENTUM})")
     
-    # Log augmentation settings
     logger.info("Data Augmentation Configuration:")
     logger.info(f"  - MixUp: {'Enabled' if config.USE_MIXUP else 'Disabled'}")
     if config.USE_MIXUP:
@@ -920,7 +783,16 @@ def main():
     if args.resume_from:
         logger.info(f"Will attempt to resume from checkpoint: {args.resume_from}")
     
-    history, model = train_model(config)
+    if config.DISTRIBUTED:
+        mp.spawn(
+            train_model,
+            args=(config, args.resume_from),  # Pass config and resume_from as args
+            nprocs=torch.cuda.device_count(),
+            join=True
+        )
+    else:
+        history, model = train_model(0, config, resume_from=args.resume_from)  # Pass local_rank=0 for single-GPU
+    
     logger.info("Staged training with MixUp/CutMix completed successfully!")
     return history, model
 
