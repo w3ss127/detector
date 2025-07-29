@@ -1,0 +1,41 @@
+DEEPFAKE DETECTION MODEL - TEST SUMMARY
+==================================================
+
+Test Date: 2025-07-29 21:05:23
+Number of Classes: 3
+Class Names: real, semi-synthetic, synthetic
+Total Test Samples: 15000
+
+KEY PERFORMANCE METRICS:
+------------------------------
+Overall Accuracy: 0.7693 (76.93%)
+Overall MCC: 0.6581
+Macro F1-Score: 0.7730
+Weighted F1-Score: 0.7730
+
+PER-CLASS PERFORMANCE SUMMARY:
+-----------------------------------
+Class           Accuracy   MCC      F1       Support 
+--------------------------------------------------
+real            0.8234     0.7006   0.8026   5000    
+semi-synthetic  0.7486     0.5248   0.6928   5000    
+synthetic       0.7360     0.7614   0.8237   5000    
+
+CONFUSION MATRIX:
+--------------------
+True\Predicted  real      semi-syn  syntheti  
+real           4117      864       19        
+semi-synthet   1021      3743      236       
+synthetic      121       1199      3680      
+
+PERFORMANCE INTERPRETATION:
+------------------------------
+Overall Performance: Fair
+Best Performing Class: synthetic (F1: 0.8237)
+Worst Performing Class: semi-synthetic (F1: 0.6928)
+Class Imbalance Ratio: 1.00:1
+
+RECOMMENDATIONS:
+-----------------
+- Consider additional training or model architecture improvements
+- Focus on improving semi-synthetic class performance

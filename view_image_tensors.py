@@ -7,10 +7,10 @@ import numpy as np
 from pathlib import Path
 
 # ==== Static configuration ====
-TENSOR_FILE = 'datasets/train/semi-synthetic/openv7_4.pt'  # Path to .pt tensor file
-START_INDEX = 3000  # Start index of tensor to extract
+TENSOR_FILE = 'datasets/test/semi-synthetic/seg_inpainting_0.pt'  # Path to .pt tensor file
+START_INDEX = 0  # Start index of tensor to extract
 COUNT = 50       # Number of tensors to extract
-OUTPUT_DIR = 'extracted_images'  # Directory to save images
+OUTPUT_DIR = 'datasets/extracted_images'  # Directory to save images
 
 # Optional imports with graceful fallback
 try:
@@ -38,7 +38,7 @@ def load_and_view_tensors(tensor_path: str, num_images: int = 5):
     print(f"Loading tensors from: {tensor_path}")
     
     # Load the tensors
-    tensors = torch.load(tensor_path, weights_only=True)
+    tensors = torch.load(tensor_path, weights_only=False)
     
     print(f"✅ Loaded tensors successfully!")
     print(f"📊 Tensor shape: {tensors.shape}")
@@ -122,7 +122,7 @@ def main():
     import torch
     import os
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    tensors = torch.load(TENSOR_FILE)
+    tensors = torch.load(TENSOR_FILE, weights_only=False)
 
     print(f"✅ Loaded tensors successfully!")
     print(f"📊 Tensor shape: {tensors.shape}")
