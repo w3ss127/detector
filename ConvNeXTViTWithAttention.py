@@ -73,7 +73,7 @@ class EnhancedConfig:
         self.LABEL_SMOOTHING = 0.1
         
         # Checkpointing
-        self.CHECKPOINT_DIR = "checkpoints"
+        self.CHECKPOINT_DIR = "multi_checkpoints"
         self.CHECKPOINT_EVERY_N_EPOCHS = 5
         
         # MCC-based model selection
@@ -1149,7 +1149,7 @@ def main():
                       help='Input image size')
     parser.add_argument('--num_workers', type=int, default=4, 
                       help='Number of data loader workers')
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', 
+    parser.add_argument('--checkpoint_dir', type=str, default='multi_checkpoints', 
                       help='Directory to save checkpoints')
     parser.add_argument('--resume', type=str, default=None, 
                       help='Path to checkpoint to resume from')

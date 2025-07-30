@@ -1,131 +1,66 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
-from torchvision.models import convnext_tiny, convnext_small
-import timm
-import os
 import numpy as np
 from sklearn.metrics import confusion_matrix, classification_report, matthews_corrcoef, accuracy_score
-from sklearn.metrics import precision_recall_fscore_support, roc_auc_score, roc_curve
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-import argparse
-from pathlib import Path
-import logging
-import warnings
+from sklearn.metrics import precision_recall_fscore_support, roc_auc_score
+import timm
+import torchvision.transforms as transforms
+from torchvision.models import convnext_tiny, convnext_small
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import pandas as pd
-from collections import defaultdict
-import json
+from torch.utils.data import Dataset, DataLoader
+import os
+import argparse
+import logging
+from pathlib import Path
+from tqdm import tqdm
+import warnings
 import time
+import pandas as pd
 
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class EnhancedConfig:
-    """Configuration for deepfake detection testing"""
+class TestConfig:
+    """Configuration for deepfake detection testing."""
     def __init__(self):
         self.MODEL_TYPE = "enhanced_convnext_vit"
         self.CONVNEXT_BACKBONE = "convnext_tiny"
-        self.PRETRAINED_WEIGHTS = "IMAGENET1K_V1"
         self.NUM_CLASSES = 3
         self.HIDDEN_DIM = 1024
         self.DROPOUT_RATE = 0.3
         self.ATTENTION_DROPOUT = 0.1
         self.USE_SPECTRAL_NORM = True
         self.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.BATCH_SIZE = 32
+        self.BATCH_SIZE = 64  # Larger batch size for testing
+        self.TEST_PATH = "datasets/test"
         self.IMAGE_SIZE = 224
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
-        self.TEST_PATH = "datasets/test"  # Will be overridden by args
-        self.CHECKPOINT_PATH = "checkpoints/best_model_staged.pth"
+        self.MODEL_PATH = None
         self.RESULTS_DIR = "test_results"
 
-class SpectralNorm(nn.Module):
-    """Spectral normalization for regularization"""
-    def __init__(self, module, name='weight', power_iterations=1):
-        super().__init__()
-        self.module = module
-        self.name = name
-        self.power_iterations = power_iterations
-        if not self._made_params():
-            self._make_params()
-
-    def _update_u_v(self):
-        u = getattr(self.module, self.name + "_u")
-        v = getattr(self.module, self.name + "_v")
-        w = getattr(self.module, self.name + "_bar")
-        w_shape = w.shape
-        height = w_shape[0]
-        width = w_shape[1] * w_shape[2] * w_shape[3] if len(w_shape) == 4 else w_shape[1]
-        w_reshaped = w.view(height, -1)
-
-        for _ in range(self.power_iterations):
-            v.data = F.normalize(torch.matmul(w_reshaped.t(), u.data), dim=0)
-            u.data = F.normalize(torch.matmul(w_reshaped, v.data), dim=0)
-
-        sigma = torch.dot(u.data, torch.matmul(w_reshaped, v.data)).clamp(min=1e-10)
-        w_normalized = w / sigma
-        if len(w_shape) == 4:
-            w_normalized = w_normalized.view(w_shape)
-        setattr(self.module, self.name, w_normalized)
-
-    def _made_params(self):
-        try:
-            getattr(self.module, self.name + "_u")
-            getattr(self.module, self.name + "_v")
-            getattr(self.module, self.name + "_bar")
-            return True
-        except AttributeError:
-            return False
-
-    def _make_params(self):
-        w = getattr(self.module, self.name)
-        w_shape = w.shape
-        height = w_shape[0]
-        width = w_shape[1] * w_shape[2] * w_shape[3] if len(w_shape) == 4 else w_shape[1]
-        u = nn.Parameter(torch.randn(height).normal_(0, 1), requires_grad=False)
-        v = nn.Parameter(torch.randn(width).normal_(0, 1), requires_grad=False)
-        u.data = F.normalize(u.data, dim=0)
-        v.data = F.normalize(v.data, dim=0)
-        w_bar = nn.Parameter(w.data)
-        del self.module._parameters[self.name]
-        self.module.register_parameter(self.name + "_u", u)
-        self.module.register_parameter(self.name + "_v", v)
-        self.module.register_parameter(self.name + "_bar", w_bar)
-
-    def forward(self, *args):
-        self._update_u_v()
-        return self.module.forward(*args)
-
 class EnhancedAttentionModule(nn.Module):
-    """Attention module with channel and spatial attention"""
+    """Attention module with channel and spatial attention."""
     def __init__(self, channels, reduction=16, config=None):
         super().__init__()
-        self.config = config or EnhancedConfig()
+        self.config = config or TestConfig()
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.utils.spectral_norm(nn.Conv2d(channels, channels // reduction, 1, bias=False)) if self.config.USE_SPECTRAL_NORM else nn.Conv2d(channels, channels // reduction, 1, bias=False),
             nn.ReLU(inplace=True),
             nn.Dropout(self.config.ATTENTION_DROPOUT),
-            nn.Conv2d(channels // reduction, channels, 1, bias=False),
+            nn.utils.spectral_norm(nn.Conv2d(channels // reduction, channels, 1, bias=False)) if self.config.USE_SPECTRAL_NORM else nn.Conv2d(channels // reduction, channels, 1, bias=False),
             nn.Sigmoid()
         )
         self.spatial_attention = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=7, padding=3, bias=False),
+            nn.utils.spectral_norm(nn.Conv2d(2, 16, kernel_size=7, padding=3, bias=False)) if self.config.USE_SPECTRAL_NORM else nn.Conv2d(2, 16, kernel_size=7, padding=3, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, kernel_size=7, padding=3, bias=False),
+            nn.utils.spectral_norm(nn.Conv2d(16, 1, kernel_size=7, padding=3, bias=False)) if self.config.USE_SPECTRAL_NORM else nn.Conv2d(16, 1, kernel_size=7, padding=3, bias=False),
             nn.Sigmoid()
         )
-        if self.config.USE_SPECTRAL_NORM:
-            self.spatial_attention[0] = SpectralNorm(self.spatial_attention[0])
-            self.spatial_attention[2] = SpectralNorm(self.spatial_attention[2])
 
     def forward(self, x):
         if x.dim() == 2:
@@ -140,19 +75,23 @@ class EnhancedAttentionModule(nn.Module):
         return x_final.view(x_final.size(0), x_final.size(1))
 
 class EnhancedConvNextViTModel(nn.Module):
-    """Hybrid ConvNeXt and ViT model with attention"""
+    """Hybrid ConvNeXt and ViT model with attention."""
     def __init__(self, config):
         super().__init__()
         self.config = config
+        
+        # Initialize ConvNeXt backbone
         if config.CONVNEXT_BACKBONE == 'convnext_tiny':
-            self.convnext = convnext_tiny(weights=config.PRETRAINED_WEIGHTS)
+            self.convnext = convnext_tiny(weights=None)  # No pretrained weights for testing
         elif config.CONVNEXT_BACKBONE == 'convnext_small':
-            self.convnext = convnext_small(weights=config.PRETRAINED_WEIGHTS)
+            self.convnext = convnext_small(weights=None)
         else:
             raise ValueError(f"Unsupported ConvNeXt backbone: {config.CONVNEXT_BACKBONE}")
         
-        self.vit = timm.create_model('vit_base_patch16_224', pretrained=config.PRETRAINED_WEIGHTS is not None, num_classes=0)
+        # Initialize ViT backbone
+        self.vit = timm.create_model('vit_base_patch16_224', pretrained=False, num_classes=0)
         
+        # Get feature dimensions
         for module in self.convnext.classifier:
             if isinstance(module, nn.Linear):
                 convnext_features = module.in_features
@@ -162,32 +101,33 @@ class EnhancedConvNextViTModel(nn.Module):
         
         vit_features = self.vit.num_features
         
+        # Initialize attention and fusion layers
         self.attention_module = EnhancedAttentionModule(channels=convnext_features + vit_features, config=config)
         self.fusion = nn.Sequential(
-            nn.Linear(convnext_features + vit_features, config.HIDDEN_DIM),
+            nn.utils.spectral_norm(nn.Linear(convnext_features + vit_features, config.HIDDEN_DIM)) if config.USE_SPECTRAL_NORM else nn.Linear(convnext_features + vit_features, config.HIDDEN_DIM),
             nn.GELU(),
             nn.Dropout(config.DROPOUT_RATE),
-            nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)
+            nn.utils.spectral_norm(nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)) if config.USE_SPECTRAL_NORM else nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)
         )
-        if config.USE_SPECTRAL_NORM:
-            self.fusion[0] = nn.utils.spectral_norm(self.fusion[0])
-            self.fusion[3] = nn.utils.spectral_norm(self.fusion[3])
 
     def forward(self, x):
+        # ConvNeXt feature extraction
         convnext_feats = self.convnext.features(x)
         convnext_feats = self.convnext.avgpool(convnext_feats)
         convnext_feats = torch.flatten(convnext_feats, 1)
         
+        # ViT feature extraction
         vit_feats = self.vit.forward_features(x)
-        vit_feats = vit_feats[:, 0]
+        vit_feats = vit_feats[:, 0]  # Use CLS token
         
+        # Feature fusion and attention
         fused_features = torch.cat([convnext_feats, vit_feats], dim=1)
         fused_features = self.attention_module(fused_features)
         logits = self.fusion(fused_features)
         return logits
 
-class TestDatasetPT(Dataset):
-    """Dataset for loading .pt files for testing"""
+class TestDataset(Dataset):
+    """Dataset for loading test .pt files."""
     def __init__(self, root_dir, config, transform=None):
         self.root_dir = Path(root_dir)
         self.config = config
@@ -196,55 +136,54 @@ class TestDatasetPT(Dataset):
         self.images = []
         self.labels = []
         self.file_mapping = []
-        self.class_counts = defaultdict(int)
         self._load_dataset()
 
     def _load_dataset(self):
-        logger.info("Loading test dataset from .pt files...")
-        total_images = 0
+        """Load dataset from .pt files and validate tensor shapes."""
+        logger.info(f"Loading test dataset from {self.root_dir}...")
+        class_counts = {class_name: 0 for class_name in self.class_names}
         
         for class_idx, class_name in enumerate(self.class_names):
             class_dir = self.root_dir / class_name
             if not class_dir.exists():
                 logger.warning(f"Class directory {class_dir} does not exist")
                 continue
-            
+                
             pt_files = list(class_dir.glob('*.pt'))
             logger.info(f"Found {len(pt_files)} .pt files in {class_name} directory")
             
-            class_image_count = 0
-            for pt_file in tqdm(pt_files, desc=f"Loading {class_name} files"):
+            for pt_file in tqdm(pt_files, desc=f"Loading {class_name}"):
                 try:
                     tensor_data = torch.load(pt_file, map_location='cpu')
+                    
+                    # Handle different tensor formats
                     if isinstance(tensor_data, dict):
                         tensor_data = tensor_data.get('images', tensor_data.get('data', list(tensor_data.values())[0]))
                     
-                    # Handle different tensor shapes
-                    if tensor_data.dim() == 4:  # [N, C, H, W]
-                        batch_size = tensor_data.shape[0]
-                        for i in range(batch_size):
-                            self.labels.append(class_idx)
-                            self.file_mapping.append((str(pt_file), i))
-                            self.images.append(tensor_data[i])
-                            class_image_count += 1
-                    elif tensor_data.dim() == 3:  # [C, H, W] - single image
+                    # Validate tensor shape
+                    if tensor_data.dim() != 4 or tensor_data.shape[1] != 3:
+                        logger.warning(f"Invalid tensor shape in {pt_file}: {tensor_data.shape}")
+                        continue
+                    
+                    # Add all images from this tensor
+                    for i in range(tensor_data.shape[0]):
                         self.labels.append(class_idx)
-                        self.file_mapping.append((str(pt_file), 0))
-                        self.images.append(tensor_data)
-                        class_image_count += 1
-                    else:
-                        logger.warning(f"Unexpected tensor shape in {pt_file}: {tensor_data.shape}")
+                        self.file_mapping.append((str(pt_file), i))
+                        self.images.append(tensor_data[i])
+                        class_counts[class_name] += 1
                         
                 except Exception as e:
                     logger.error(f"Error loading {pt_file}: {e}")
-            
-            self.class_counts[class_name] = class_image_count
-            total_images += class_image_count
-            logger.info(f"Loaded {class_image_count} images from {class_name} class")
+                    continue
         
-        logger.info(f"Total images loaded: {total_images}")
-        for class_name, count in self.class_counts.items():
-            logger.info(f"  {class_name}: {count} images")
+        logger.info(f"Loaded {len(self.images)} total images")
+        for class_name, count in class_counts.items():
+            logger.info(f"  - {class_name}: {count} images")
+            if count == 0:
+                logger.warning(f"No images loaded for class {class_name}")
+        
+        if not self.images:
+            raise ValueError("No valid images loaded from dataset")
 
     def __len__(self):
         return len(self.images)
@@ -264,13 +203,11 @@ class TestDatasetPT(Dataset):
             
             image_tensor = torch.clamp(image_tensor, 0, 1)
             
-            # Apply transforms if provided
+            # Apply transforms if specified
             if self.transform:
-                # Convert to numpy for albumentations
                 image_np = image_tensor.permute(1, 2, 0).numpy()
                 if image_np.max() <= 1.0:
                     image_np = (image_np * 255).astype(np.uint8)
-                
                 transformed = self.transform(image=image_np)
                 image_tensor = transformed['image']
             
@@ -278,662 +215,336 @@ class TestDatasetPT(Dataset):
             
         except Exception as e:
             logger.error(f"Error loading image at index {idx}: {e}")
-            # Return a zero tensor as fallback
             return torch.zeros(3, self.config.IMAGE_SIZE, self.config.IMAGE_SIZE), 0
 
-class TestDataAugmentation:
-    """Test-time data augmentation (minimal, preserving forensic artifacts)"""
-    def __init__(self, config):
-        self.config = config
+def get_test_transforms(config):
+    """Get test transforms (no augmentation, just resize and normalize)."""
+    return A.Compose([
+        A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
+        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ToTensorV2()
+    ])
 
-    def get_test_transforms(self):
-        return A.Compose([
-            A.Resize(self.config.IMAGE_SIZE, self.config.IMAGE_SIZE),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
-        ])
-
-def load_model_checkpoint(model, checkpoint_path, config):
-    """Load model from checkpoint"""
-    logger.info(f"Loading model from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=config.DEVICE)
+def load_model(model_path, config):
+    """Load trained model from checkpoint."""
+    logger.info(f"Loading model from {model_path}")
     
-    # Load model state dict
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model = EnhancedConvNextViTModel(config).to(config.DEVICE)
     
-    # Log checkpoint information
-    epoch = checkpoint.get('epoch', 'Unknown')
-    stage = checkpoint.get('stage', 'Unknown')
-    val_acc = checkpoint.get('val_acc', 'Unknown')
-    train_acc = checkpoint.get('train_acc', 'Unknown')
-    backbone_frozen = checkpoint.get('backbone_frozen', 'Unknown')
-    optimizer_type = checkpoint.get('optimizer_type', 'Unknown')
-    
-    logger.info(f"Loaded checkpoint from:")
-    logger.info(f"  - Epoch: {epoch}")
-    logger.info(f"  - Stage: {stage}")
-    logger.info(f"  - Validation accuracy: {val_acc}")
-    logger.info(f"  - Training accuracy: {train_acc}")
-    logger.info(f"  - Backbone frozen: {backbone_frozen}")
-    logger.info(f"  - Optimizer type: {optimizer_type}")
+    try:
+        checkpoint = torch.load(model_path, map_location=config.DEVICE)
+        
+        # Handle different checkpoint formats
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            logger.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+            if 'val_acc' in checkpoint:
+                logger.info(f"Checkpoint validation accuracy: {checkpoint['val_acc']:.4f}")
+        else:
+            state_dict = checkpoint
+        
+        model.load_state_dict(state_dict)
+        logger.info("Model loaded successfully")
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        raise
     
     return model
 
-def calculate_metrics(y_true, y_pred, y_prob, class_names):
-    """Calculate comprehensive metrics"""
-    metrics = {}
+def calculate_multiclass_mcc(y_true, y_pred, num_classes):
+    """Calculate Matthews Correlation Coefficient for multiclass classification."""
+    # Calculate confusion matrix
+    C = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
     
-    # Overall accuracy
-    metrics['overall_accuracy'] = accuracy_score(y_true, y_pred)
+    # Calculate MCC using the multiclass formula
+    t_k = np.sum(C, axis=1)  # True samples for each class
+    p_k = np.sum(C, axis=0)  # Predicted samples for each class
+    c = np.trace(C)  # Correctly predicted samples
+    s = np.sum(C)    # Total samples
     
-    # Per-class accuracy
-    cm = confusion_matrix(y_true, y_pred)
-    per_class_acc = cm.diagonal() / cm.sum(axis=1)
-    for i, class_name in enumerate(class_names):
-        metrics[f'accuracy_{class_name}'] = per_class_acc[i]
+    # Calculate numerator and denominator
+    numerator = c * s - np.sum(t_k * p_k)
+    denominator = np.sqrt((s**2 - np.sum(p_k**2)) * (s**2 - np.sum(t_k**2)))
     
-    # Matthews Correlation Coefficient (overall)
-    metrics['overall_mcc'] = matthews_corrcoef(y_true, y_pred)
+    if denominator == 0:
+        return 0.0
     
-    # Per-class MCC (one-vs-rest)
-    for i, class_name in enumerate(class_names):
-        y_true_binary = (np.array(y_true) == i).astype(int)
-        y_pred_binary = (np.array(y_pred) == i).astype(int)
-        metrics[f'mcc_{class_name}'] = matthews_corrcoef(y_true_binary, y_pred_binary)
-    
-    # Precision, Recall, F1-score
-    precision, recall, f1, support = precision_recall_fscore_support(y_true, y_pred, average=None)
-    for i, class_name in enumerate(class_names):
-        metrics[f'precision_{class_name}'] = precision[i]
-        metrics[f'recall_{class_name}'] = recall[i]
-        metrics[f'f1_{class_name}'] = f1[i]
-        metrics[f'support_{class_name}'] = support[i]
-    
-    # Macro and weighted averages
-    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(y_true, y_pred, average='macro')
-    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted')
-    
-    metrics['precision_macro'] = precision_macro
-    metrics['recall_macro'] = recall_macro
-    metrics['f1_macro'] = f1_macro
-    metrics['precision_weighted'] = precision_weighted
-    metrics['recall_weighted'] = recall_weighted
-    metrics['f1_weighted'] = f1_weighted
-    
-    # AUC (if multiclass)
-    if len(class_names) > 2:
-        try:
-            auc_ovr = roc_auc_score(y_true, y_prob, multi_class='ovr', average='macro')
-            auc_ovo = roc_auc_score(y_true, y_prob, multi_class='ovo', average='macro')
-            metrics['auc_ovr_macro'] = auc_ovr
-            metrics['auc_ovo_macro'] = auc_ovo
-        except Exception as e:
-            logger.warning(f"Could not calculate AUC: {e}")
-    
-    return metrics
+    return numerator / denominator
 
-def plot_confusion_matrix(cm, class_names, save_path):
-    """Plot and save confusion matrix"""
-    plt.figure(figsize=(10, 8))
+def calculate_per_class_mcc(y_true, y_pred, num_classes):
+    """Calculate MCC for each class using one-vs-rest approach."""
+    per_class_mcc = []
     
-    # Calculate percentages
-    cm_percent = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis] * 100
+    for class_id in range(num_classes):
+        # Convert to binary classification problem
+        y_true_binary = (np.array(y_true) == class_id).astype(int)
+        y_pred_binary = (np.array(y_pred) == class_id).astype(int)
+        
+        mcc = matthews_corrcoef(y_true_binary, y_pred_binary)
+        per_class_mcc.append(mcc)
     
-    # Create annotations with both count and percentage
-    annotations = []
-    for i in range(cm.shape[0]):
-        row = []
-        for j in range(cm.shape[1]):
-            row.append(f'{cm[i, j]}\n({cm_percent[i, j]:.1f}%)')
-        annotations.append(row)
-    
-    sns.heatmap(cm, annot=annotations, fmt='', cmap='Blues', 
-                xticklabels=class_names, yticklabels=class_names)
-    plt.title('Confusion Matrix')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    logger.info(f"Confusion matrix saved to {save_path}")
+    return per_class_mcc
 
-def plot_per_class_metrics(metrics, class_names, save_path):
-    """Plot per-class metrics"""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    
-    # Accuracy
-    accuracies = [metrics[f'accuracy_{cls}'] for cls in class_names]
-    axes[0, 0].bar(class_names, accuracies, color='skyblue')
-    axes[0, 0].set_title('Per-Class Accuracy')
-    axes[0, 0].set_ylabel('Accuracy')
-    axes[0, 0].set_ylim(0, 1)
-    for i, v in enumerate(accuracies):
-        axes[0, 0].text(i, v + 0.01, f'{v:.3f}', ha='center')
-    
-    # MCC
-    mccs = [metrics[f'mcc_{cls}'] for cls in class_names]
-    axes[0, 1].bar(class_names, mccs, color='lightcoral')
-    axes[0, 1].set_title('Per-Class Matthews Correlation Coefficient')
-    axes[0, 1].set_ylabel('MCC')
-    axes[0, 1].set_ylim(-1, 1)
-    for i, v in enumerate(mccs):
-        axes[0, 1].text(i, v + 0.02, f'{v:.3f}', ha='center')
-    
-    # Precision, Recall, F1
-    precisions = [metrics[f'precision_{cls}'] for cls in class_names]
-    recalls = [metrics[f'recall_{cls}'] for cls in class_names]
-    f1s = [metrics[f'f1_{cls}'] for cls in class_names]
-    
-    x = np.arange(len(class_names))
-    width = 0.25
-    
-    axes[1, 0].bar(x - width, precisions, width, label='Precision', color='lightgreen')
-    axes[1, 0].bar(x, recalls, width, label='Recall', color='orange')
-    axes[1, 0].bar(x + width, f1s, width, label='F1-Score', color='purple')
-    axes[1, 0].set_title('Precision, Recall, and F1-Score')
-    axes[1, 0].set_ylabel('Score')
-    axes[1, 0].set_xticks(x)
-    axes[1, 0].set_xticklabels(class_names)
-    axes[1, 0].legend()
-    axes[1, 0].set_ylim(0, 1)
-    
-    # Support (sample count)
-    supports = [metrics[f'support_{cls}'] for cls in class_names]
-    axes[1, 1].bar(class_names, supports, color='gold')
-    axes[1, 1].set_title('Support (Number of Samples)')
-    axes[1, 1].set_ylabel('Count')
-    for i, v in enumerate(supports):
-        axes[1, 1].text(i, v + max(supports) * 0.01, f'{int(v)}', ha='center')
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    logger.info(f"Per-class metrics plot saved to {save_path}")
-
-def save_detailed_results(metrics, class_names, save_path):
-    """Save detailed results to JSON and CSV"""
-    # Save as JSON
-    json_path = save_path.replace('.txt', '.json')
-    with open(json_path, 'w') as f:
-        json.dump(metrics, f, indent=2, default=str)
-    
-    # Create DataFrame for CSV
-    results_data = []
-    
-    # Overall metrics
-    results_data.append({
-        'Metric': 'Overall Accuracy',
-        'Value': metrics['overall_accuracy'],
-        'Class': 'Overall'
-    })
-    results_data.append({
-        'Metric': 'Overall MCC',
-        'Value': metrics['overall_mcc'],
-        'Class': 'Overall'
-    })
-    
-    # Macro averages
-    results_data.append({
-        'Metric': 'Precision (Macro)',
-        'Value': metrics['precision_macro'],
-        'Class': 'Overall'
-    })
-    results_data.append({
-        'Metric': 'Recall (Macro)',
-        'Value': metrics['recall_macro'],
-        'Class': 'Overall'
-    })
-    results_data.append({
-        'Metric': 'F1-Score (Macro)',
-        'Value': metrics['f1_macro'],
-        'Class': 'Overall'
-    })
-    
-    # Per-class metrics
-    for class_name in class_names:
-        for metric_type in ['accuracy', 'mcc', 'precision', 'recall', 'f1', 'support']:
-            results_data.append({
-                'Metric': metric_type.capitalize(),
-                'Value': metrics[f'{metric_type}_{class_name}'],
-                'Class': class_name
-            })
-    
-    # Save as CSV
-    csv_path = save_path.replace('.txt', '.csv')
-    df = pd.DataFrame(results_data)
-    df.to_csv(csv_path, index=False)
-    
-    # Save as formatted text
-    with open(save_path, 'w') as f:
-        f.write("DEEPFAKE DETECTION MODEL TEST RESULTS\n")
-        f.write("=" * 50 + "\n\n")
-        
-        # Overall metrics
-        f.write("OVERALL METRICS:\n")
-        f.write("-" * 20 + "\n")
-        f.write(f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n")
-        f.write(f"Overall MCC: {metrics['overall_mcc']:.4f}\n")
-        f.write(f"Precision (Macro): {metrics['precision_macro']:.4f}\n")
-        f.write(f"Recall (Macro): {metrics['recall_macro']:.4f}\n")
-        f.write(f"F1-Score (Macro): {metrics['f1_macro']:.4f}\n")
-        f.write(f"Precision (Weighted): {metrics['precision_weighted']:.4f}\n")
-        f.write(f"Recall (Weighted): {metrics['recall_weighted']:.4f}\n")
-        f.write(f"F1-Score (Weighted): {metrics['f1_weighted']:.4f}\n")
-        
-        if 'auc_ovr_macro' in metrics:
-            f.write(f"AUC (OvR Macro): {metrics['auc_ovr_macro']:.4f}\n")
-            f.write(f"AUC (OvO Macro): {metrics['auc_ovo_macro']:.4f}\n")
-        
-        f.write("\n")
-        
-        # Per-class metrics
-        f.write("PER-CLASS METRICS:\n")
-        f.write("-" * 20 + "\n")
-        for class_name in class_names:
-            f.write(f"\n{class_name.upper()} CLASS:\n")
-            f.write(f"  Accuracy: {metrics[f'accuracy_{class_name}']:.4f}\n")
-            f.write(f"  MCC: {metrics[f'mcc_{class_name}']:.4f}\n")
-            f.write(f"  Precision: {metrics[f'precision_{class_name}']:.4f}\n")
-            f.write(f"  Recall: {metrics[f'recall_{class_name}']:.4f}\n")
-            f.write(f"  F1-Score: {metrics[f'f1_{class_name}']:.4f}\n")
-            f.write(f"  Support: {int(metrics[f'support_{class_name}'])}\n")
-    
-    logger.info(f"Detailed results saved to:")
-    logger.info(f"  - Text: {save_path}")
-    logger.info(f"  - JSON: {json_path}")
-    logger.info(f"  - CSV: {csv_path}")
-
-def test_model(config):
-    """Main testing function"""
-    # Create results directory
-    os.makedirs(config.RESULTS_DIR, exist_ok=True)
-    timestamp = time.strftime('%Y%m%d_%H%M%S')
-    
-    # Create test dataset and dataloader
-    test_dataset = TestDatasetPT(
-        root_dir=config.TEST_PATH,
-        config=config,
-        transform=TestDataAugmentation(config).get_test_transforms()
-    )
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.BATCH_SIZE,
-        shuffle=False,
-        num_workers=config.NUM_WORKERS,
-        pin_memory=True
-    )
-    
-    logger.info(f"Test dataset size: {len(test_dataset)}")
-    
-    # Load model
-    model = EnhancedConvNextViTModel(config).to(config.DEVICE)
-    model = load_model_checkpoint(model, config.CHECKPOINT_PATH, config)
+def evaluate_model(model, test_loader, config):
+    """Evaluate model on test dataset."""
     model.eval()
     
-    # Test the model
-    logger.info("Starting model evaluation...")
     all_predictions = []
     all_labels = []
     all_probabilities = []
+    total_samples = 0
+    correct_predictions = 0
+    
+    logger.info("Starting model evaluation...")
     
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(tqdm(test_loader, desc="Testing")):
             data, target = data.to(config.DEVICE), target.to(config.DEVICE)
             
             # Forward pass
-            outputs = model(data)
-            probabilities = F.softmax(outputs, dim=1)
-            predictions = outputs.argmax(dim=1)
+            output = model(data)
+            probabilities = F.softmax(output, dim=1)
+            predictions = output.argmax(dim=1)
             
             # Collect results
             all_predictions.extend(predictions.cpu().numpy())
             all_labels.extend(target.cpu().numpy())
             all_probabilities.extend(probabilities.cpu().numpy())
+            
+            # Update counters
+            correct_predictions += predictions.eq(target).sum().item()
+            total_samples += target.size(0)
     
     # Convert to numpy arrays
     all_predictions = np.array(all_predictions)
     all_labels = np.array(all_labels)
     all_probabilities = np.array(all_probabilities)
     
-    logger.info("Model evaluation completed. Calculating metrics...")
-    
-    # Calculate metrics
-    metrics = calculate_metrics(all_labels, all_predictions, all_probabilities, config.CLASS_NAMES)
-    
-    # Print key results
-    logger.info("\nKEY RESULTS:")
-    logger.info("=" * 40)
-    logger.info(f"Overall Accuracy: {metrics['overall_accuracy']:.4f}")
-    logger.info(f"Overall MCC: {metrics['overall_mcc']:.4f}")
-    logger.info(f"Macro F1-Score: {metrics['f1_macro']:.4f}")
-    
-    logger.info("\nPer-Class Results:")
-    for class_name in config.CLASS_NAMES:
-        logger.info(f"{class_name.upper()}:")
-        logger.info(f"  Accuracy: {metrics[f'accuracy_{class_name}']:.4f}")
-        logger.info(f"  MCC: {metrics[f'mcc_{class_name}']:.4f}")
-        logger.info(f"  F1-Score: {metrics[f'f1_{class_name}']:.4f}")
-    
-    # Generate confusion matrix
-    cm = confusion_matrix(all_labels, all_predictions)
-    logger.info(f"\nConfusion Matrix:")
-    logger.info(f"{cm}")
-    
-    # Save results and plots
-    results_base_path = os.path.join(config.RESULTS_DIR, f"test_results_{timestamp}")
-    
-    # Save detailed results
-    save_detailed_results(metrics, config.CLASS_NAMES, f"{results_base_path}.txt")
-    
-    # Plot and save confusion matrix
-    plot_confusion_matrix(cm, config.CLASS_NAMES, f"{results_base_path}_confusion_matrix.png")
-    
-    # Plot and save per-class metrics
-    plot_per_class_metrics(metrics, config.CLASS_NAMES, f"{results_base_path}_per_class_metrics.png")
-    
-    # Save raw predictions for further analysis
-    predictions_data = {
-        'true_labels': all_labels.tolist(),
-        'predicted_labels': all_predictions.tolist(),
-        'probabilities': all_probabilities.tolist(),
-        'class_names': config.CLASS_NAMES,
-        'file_mapping': test_dataset.file_mapping
-    }
-    
-    predictions_path = f"{results_base_path}_predictions.json"
-    with open(predictions_path, 'w') as f:
-        json.dump(predictions_data, f, indent=2)
-    logger.info(f"Raw predictions saved to {predictions_path}")
-    
-    # Create summary report
-    create_summary_report(metrics, cm, config.CLASS_NAMES, f"{results_base_path}_summary.txt")
-    
-    logger.info(f"\nTest completed! Results saved to {config.RESULTS_DIR}")
-    return metrics, all_predictions, all_labels, all_probabilities
+    return all_predictions, all_labels, all_probabilities
 
-def create_summary_report(metrics, cm, class_names, save_path):
-    """Create a concise summary report"""
-    with open(save_path, 'w') as f:
-        f.write("DEEPFAKE DETECTION MODEL - TEST SUMMARY\n")
-        f.write("=" * 50 + "\n\n")
-        
-        f.write(f"Test Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Number of Classes: {len(class_names)}\n")
-        f.write(f"Class Names: {', '.join(class_names)}\n")
-        f.write(f"Total Test Samples: {cm.sum()}\n\n")
-        
-        # Key metrics
-        f.write("KEY PERFORMANCE METRICS:\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"Overall Accuracy: {metrics['overall_accuracy']:.4f} ({metrics['overall_accuracy']*100:.2f}%)\n")
-        f.write(f"Overall MCC: {metrics['overall_mcc']:.4f}\n")
-        f.write(f"Macro F1-Score: {metrics['f1_macro']:.4f}\n")
-        f.write(f"Weighted F1-Score: {metrics['f1_weighted']:.4f}\n\n")
-        
-        # Per-class summary table
-        f.write("PER-CLASS PERFORMANCE SUMMARY:\n")
-        f.write("-" * 35 + "\n")
-        f.write(f"{'Class':<15} {'Accuracy':<10} {'MCC':<8} {'F1':<8} {'Support':<8}\n")
-        f.write("-" * 50 + "\n")
-        
-        for class_name in class_names:
-            f.write(f"{class_name:<15} "
-                   f"{metrics[f'accuracy_{class_name}']:<10.4f} "
-                   f"{metrics[f'mcc_{class_name}']:<8.4f} "
-                   f"{metrics[f'f1_{class_name}']:<8.4f} "
-                   f"{int(metrics[f'support_{class_name}']):<8d}\n")
-        
-        f.write("\n")
-        
-        # Confusion matrix
-        f.write("CONFUSION MATRIX:\n")
-        f.write("-" * 20 + "\n")
-        f.write("True\\Predicted  ")
-        for class_name in class_names:
-            f.write(f"{class_name[:8]:<10}")
-        f.write("\n")
-        
-        for i, true_class in enumerate(class_names):
-            f.write(f"{true_class[:12]:<15}")
-            for j in range(len(class_names)):
-                f.write(f"{cm[i, j]:<10}")
-            f.write("\n")
-        
-        f.write("\n")
-        
-        # Model interpretation
-        f.write("PERFORMANCE INTERPRETATION:\n")
-        f.write("-" * 30 + "\n")
-        
-        if metrics['overall_accuracy'] >= 0.9:
-            performance_level = "Excellent"
-        elif metrics['overall_accuracy'] >= 0.8:
-            performance_level = "Good"
-        elif metrics['overall_accuracy'] >= 0.7:
-            performance_level = "Fair"
+def calculate_metrics(predictions, labels, probabilities, config):
+    """Calculate comprehensive evaluation metrics."""
+    num_classes = config.NUM_CLASSES
+    class_names = config.CLASS_NAMES
+    
+    # Basic accuracy
+    overall_accuracy = accuracy_score(labels, predictions)
+    
+    # Per-class accuracy
+    per_class_accuracy = []
+    for class_id in range(num_classes):
+        class_mask = labels == class_id
+        if np.sum(class_mask) > 0:
+            class_acc = accuracy_score(labels[class_mask], predictions[class_mask])
+            per_class_accuracy.append(class_acc)
         else:
-            performance_level = "Poor"
-        
-        f.write(f"Overall Performance: {performance_level}\n")
-        
-        # Find best and worst performing classes
-        class_f1s = [(class_name, metrics[f'f1_{class_name}']) for class_name in class_names]
-        class_f1s.sort(key=lambda x: x[1], reverse=True)
-        
-        f.write(f"Best Performing Class: {class_f1s[0][0]} (F1: {class_f1s[0][1]:.4f})\n")
-        f.write(f"Worst Performing Class: {class_f1s[-1][0]} (F1: {class_f1s[-1][1]:.4f})\n")
-        
-        # Check for class imbalance issues
-        support_values = [metrics[f'support_{class_name}'] for class_name in class_names]
-        max_support = max(support_values)
-        min_support = min(support_values)
-        imbalance_ratio = max_support / min_support
-        
-        f.write(f"Class Imbalance Ratio: {imbalance_ratio:.2f}:1\n")
-        if imbalance_ratio > 3:
-            f.write("WARNING: Significant class imbalance detected. Consider balancing techniques.\n")
-        
-        f.write("\n")
-        
-        # Recommendations
-        f.write("RECOMMENDATIONS:\n")
-        f.write("-" * 17 + "\n")
-        
-        if metrics['overall_accuracy'] < 0.8:
-            f.write("- Consider additional training or model architecture improvements\n")
-        
-        if metrics['overall_mcc'] < 0.6:
-            f.write("- MCC suggests room for improvement in prediction quality\n")
-        
-        worst_class_f1 = class_f1s[-1][1]
-        if worst_class_f1 < 0.7:
-            f.write(f"- Focus on improving {class_f1s[-1][0]} class performance\n")
-        
-        if imbalance_ratio > 3:
-            f.write("- Address class imbalance through data augmentation or sampling techniques\n")
+            per_class_accuracy.append(0.0)
     
-    logger.info(f"Summary report saved to {save_path}")
+    # Confusion matrix
+    cm = confusion_matrix(labels, predictions, labels=list(range(num_classes)))
+    
+    # Classification report
+    report = classification_report(labels, predictions, target_names=class_names, output_dict=True)
+    
+    # MCC calculations
+    multiclass_mcc = calculate_multiclass_mcc(labels, predictions, num_classes)
+    per_class_mcc = calculate_per_class_mcc(labels, predictions, num_classes)
+    
+    # ROC AUC (one-vs-rest for multiclass)
+    try:
+        roc_auc = roc_auc_score(labels, probabilities, multi_class='ovr', average='macro')
+    except ValueError:
+        roc_auc = 0.0
+        logger.warning("Could not calculate ROC AUC score")
+    
+    # Precision, Recall, F1-score
+    precision, recall, f1, support = precision_recall_fscore_support(
+        labels, predictions, labels=list(range(num_classes)), average=None
+    )
+    
+    return {
+        'overall_accuracy': overall_accuracy,
+        'per_class_accuracy': per_class_accuracy,
+        'confusion_matrix': cm,
+        'classification_report': report,
+        'multiclass_mcc': multiclass_mcc,
+        'per_class_mcc': per_class_mcc,
+        'roc_auc': roc_auc,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'support': support
+    }
 
-def analyze_misclassifications(true_labels, pred_labels, probabilities, class_names, file_mapping, save_path):
-    """Analyze and save misclassification details"""
-    misclassified = []
+def print_results(metrics, config):
+    """Print evaluation results in a formatted way."""
+    class_names = config.CLASS_NAMES
     
-    for i, (true_label, pred_label) in enumerate(zip(true_labels, pred_labels)):
-        if true_label != pred_label:
-            file_path, file_index = file_mapping[i]
-            confidence = probabilities[i][pred_label]
-            true_confidence = probabilities[i][true_label]
-            
-            misclassified.append({
-                'file_path': file_path,
-                'file_index': file_index,
-                'true_class': class_names[true_label],
-                'predicted_class': class_names[pred_label],
-                'prediction_confidence': float(confidence),
-                'true_class_confidence': float(true_confidence),
-                'confidence_difference': float(confidence - true_confidence)
-            })
+    print("\n" + "="*80)
+    print("DEEPFAKE DETECTION MODEL EVALUATION RESULTS")
+    print("="*80)
     
-    # Sort by confidence difference (most confident misclassifications first)
-    misclassified.sort(key=lambda x: x['confidence_difference'], reverse=True)
+    # Overall metrics
+    print(f"\nOVERALL PERFORMANCE:")
+    print(f"  Overall Accuracy: {metrics['overall_accuracy']:.4f}")
+    print(f"  Multiclass MCC:   {metrics['multiclass_mcc']:.4f}")
+    print(f"  ROC AUC (macro):  {metrics['roc_auc']:.4f}")
     
-    # Save detailed misclassification analysis
-    with open(save_path, 'w') as f:
-        json.dump(misclassified, f, indent=2)
+    # Per-class metrics
+    print(f"\nPER-CLASS PERFORMANCE:")
+    print(f"{'Class':<15} {'Accuracy':<10} {'MCC':<10} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'Support':<10}")
+    print("-" * 80)
     
-    # Create summary
-    summary_path = save_path.replace('.json', '_summary.txt')
-    with open(summary_path, 'w') as f:
-        f.write("MISCLASSIFICATION ANALYSIS\n")
-        f.write("=" * 30 + "\n\n")
-        
-        f.write(f"Total Misclassifications: {len(misclassified)}\n")
-        f.write(f"Total Samples: {len(true_labels)}\n")
-        f.write(f"Misclassification Rate: {len(misclassified)/len(true_labels)*100:.2f}%\n\n")
-        
-        # Misclassification matrix
-        f.write("MISCLASSIFICATION PATTERNS:\n")
-        f.write("-" * 35 + "\n")
-        
-        # Count misclassifications by type
-        misclass_counts = defaultdict(int)
-        for item in misclassified:
-            key = f"{item['true_class']} -> {item['predicted_class']}"
-            misclass_counts[key] += 1
-        
-        # Sort by frequency
-        sorted_misclass = sorted(misclass_counts.items(), key=lambda x: x[1], reverse=True)
-        
-        for pattern, count in sorted_misclass:
-            percentage = count / len(misclassified) * 100
-            f.write(f"{pattern}: {count} ({percentage:.1f}% of misclassifications)\n")
-        
-        f.write("\n")
-        
-        # Top 10 most confident misclassifications
-        f.write("TOP 10 MOST CONFIDENT MISCLASSIFICATIONS:\n")
-        f.write("-" * 45 + "\n")
-        
-        for i, item in enumerate(misclassified[:10]):
-            f.write(f"{i+1}. File: {item['file_path']} (index {item['file_index']})\n")
-            f.write(f"   True: {item['true_class']} -> Predicted: {item['predicted_class']}\n")
-            f.write(f"   Confidence: {item['prediction_confidence']:.4f}\n")
-            f.write(f"   Confidence Difference: {item['confidence_difference']:.4f}\n\n")
+    for i, class_name in enumerate(class_names):
+        print(f"{class_name:<15} "
+              f"{metrics['per_class_accuracy'][i]:<10.4f} "
+              f"{metrics['per_class_mcc'][i]:<10.4f} "
+              f"{metrics['precision'][i]:<10.4f} "
+              f"{metrics['recall'][i]:<10.4f} "
+              f"{metrics['f1_score'][i]:<10.4f} "
+              f"{metrics['support'][i]:<10}")
     
-    logger.info(f"Misclassification analysis saved to {save_path}")
-    logger.info(f"Misclassification summary saved to {summary_path}")
+    # Confusion matrix
+    print(f"\nCONFUSION MATRIX:")
+    cm = metrics['confusion_matrix']
+    print("Actual \\ Predicted".ljust(20), end="")
+
+    for class_name in class_names:
+        print(f"{class_name:<15}", end="")
+    print()
+    
+    for i, class_name in enumerate(class_names):
+        print(f"{class_name:<20}", end="")
+        for j in range(len(class_names)):
+            print(f"{cm[i, j]:<15}", end="")
+        print()
+    
+    print("\n" + "="*80)
+
+def save_results(metrics, config, output_path=None):
+    """Save results to files."""
+    if output_path is None:
+        output_path = Path(config.RESULTS_DIR)
+    
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    
+    # Save summary metrics
+    summary_file = output_path / f"test_results_{timestamp}.txt"
+    with open(summary_file, 'w') as f:
+        f.write("DEEPFAKE DETECTION MODEL EVALUATION RESULTS\n")
+        f.write("="*50 + "\n\n")
+        f.write(f"Overall Accuracy: {metrics['overall_accuracy']:.4f}\n")
+        f.write(f"Multiclass MCC: {metrics['multiclass_mcc']:.4f}\n")
+        f.write(f"ROC AUC (macro): {metrics['roc_auc']:.4f}\n\n")
+        
+        f.write("Per-Class Performance:\n")
+        for i, class_name in enumerate(config.CLASS_NAMES):
+            f.write(f"\n{class_name}:\n")
+            f.write(f"  Accuracy:  {metrics['per_class_accuracy'][i]:.4f}\n")
+            f.write(f"  MCC:       {metrics['per_class_mcc'][i]:.4f}\n")
+            f.write(f"  Precision: {metrics['precision'][i]:.4f}\n")
+            f.write(f"  Recall:    {metrics['recall'][i]:.4f}\n")
+            f.write(f"  F1-Score:  {metrics['f1_score'][i]:.4f}\n")
+            f.write(f"  Support:   {metrics['support'][i]}\n")
+    
+    # Save confusion matrix as CSV
+    cm_file = output_path / f"confusion_matrix_{timestamp}.csv"
+    cm_df = pd.DataFrame(metrics['confusion_matrix'], 
+                        index=config.CLASS_NAMES, 
+                        columns=config.CLASS_NAMES)
+    cm_df.to_csv(cm_file)
+    
+    # Save detailed metrics as CSV
+    metrics_file = output_path / f"detailed_metrics_{timestamp}.csv"
+    metrics_df = pd.DataFrame({
+        'Class': config.CLASS_NAMES,
+        'Accuracy': metrics['per_class_accuracy'],
+        'MCC': metrics['per_class_mcc'],
+        'Precision': metrics['precision'],
+        'Recall': metrics['recall'],
+        'F1_Score': metrics['f1_score'],
+        'Support': metrics['support']
+    })
+    metrics_df.to_csv(metrics_file, index=False)
+    
+    logger.info(f"Results saved to {output_path}")
+    logger.info(f"  - Summary: {summary_file}")
+    logger.info(f"  - Confusion Matrix: {cm_file}")
+    logger.info(f"  - Detailed Metrics: {metrics_file}")
 
 def main():
-    """Main function with argument parsing"""
+    """Main testing function."""
     parser = argparse.ArgumentParser(description='Test Deepfake Detection Model')
+    parser.add_argument('--model-path', type=str, default="./model_stage5_epoch40_20250730_041524.pth",
+                        help='Path to trained model checkpoint')
     parser.add_argument('--test-path', type=str, default='datasets/test',
-                       help='Path to test data directory containing real/semi-synthetic/synthetic subdirectories')
-    parser.add_argument('--checkpoint-path', type=str, default='checkpoints/model_stage1_epoch5_20250729_205930.pth',
-                       help='Path to model checkpoint file')
-    parser.add_argument('--batch-size', type=int, default=32,
-                       help='Batch size for testing (default: 32)')
+                        help='Path to test dataset directory')
+    parser.add_argument('--batch-size', type=int, default=64,
+                        help='Batch size for testing')
     parser.add_argument('--num-workers', type=int, default=4,
-                       help='Number of data loading workers (default: 4)')
+                        help='Number of data loader workers')
     parser.add_argument('--results-dir', type=str, default='test_results',
-                       help='Directory to save test results (default: test_results)')
-    parser.add_argument('--image-size', type=int, default=224,
-                       help='Input image size (default: 224)')
+                        help='Directory to save results')
     parser.add_argument('--backbone', type=str, default='convnext_tiny',
-                       choices=['convnext_tiny', 'convnext_small'],
-                       help='ConvNeXt backbone architecture (default: convnext_tiny)')
-    parser.add_argument('--analyze-misclassifications', action='store_true',
-                       help='Perform detailed misclassification analysis')
-    parser.add_argument('--device', type=str, default='auto',
-                       choices=['auto', 'cuda', 'cpu'],
-                       help='Device to use for testing (default: auto)')
+                        choices=['convnext_tiny', 'convnext_small'],
+                        help='ConvNeXt backbone architecture')
     
     args = parser.parse_args()
     
-    # Create configuration
-    config = EnhancedConfig()
+    # Initialize configuration
+    config = TestConfig()
+    config.MODEL_PATH = args.model_path
     config.TEST_PATH = args.test_path
-    config.CHECKPOINT_PATH = args.checkpoint_path
     config.BATCH_SIZE = args.batch_size
     config.NUM_WORKERS = args.num_workers
     config.RESULTS_DIR = args.results_dir
-    config.IMAGE_SIZE = args.image_size
     config.CONVNEXT_BACKBONE = args.backbone
     
-    # Set device
-    if args.device == 'auto':
-        config.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        config.DEVICE = torch.device(args.device)
-    
-    # Validate paths
-    if not os.path.exists(args.test_path):
-        logger.error(f"Test data path does not exist: {args.test_path}")
-        return
-    
-    if not os.path.exists(args.checkpoint_path):
-        logger.error(f"Checkpoint file does not exist: {args.checkpoint_path}")
-        return
-    
-    # Check for required subdirectories
-    required_dirs = ['real', 'semi-synthetic', 'synthetic']
-    for class_dir in required_dirs:
-        class_path = os.path.join(args.test_path, class_dir)
-        if not os.path.exists(class_path):
-            logger.error(f"Required class directory does not exist: {class_path}")
-            return
-    
-    logger.info("=" * 60)
-    logger.info("DEEPFAKE DETECTION MODEL TESTING")
-    logger.info("=" * 60)
-    logger.info(f"Test data path: {config.TEST_PATH}")
-    logger.info(f"Checkpoint path: {config.CHECKPOINT_PATH}")
-    logger.info(f"Batch size: {config.BATCH_SIZE}")
-    logger.info(f"Device: {config.DEVICE}")
-    logger.info(f"Backbone: {config.CONVNEXT_BACKBONE}")
-    logger.info(f"Results directory: {config.RESULTS_DIR}")
-    logger.info("=" * 60)
+    logger.info(f"Testing configuration:")
+    logger.info(f"  Model path: {config.MODEL_PATH}")
+    logger.info(f"  Test data path: {config.TEST_PATH}")
+    logger.info(f"  Batch size: {config.BATCH_SIZE}")
+    logger.info(f"  Device: {config.DEVICE}")
+    logger.info(f"  Backbone: {config.CONVNEXT_BACKBONE}")
     
     try:
-        # Run testing
-        metrics, predictions, labels, probabilities = test_model(config)
+        # Load test dataset
+        test_transforms = get_test_transforms(config)
+        test_dataset = TestDataset(config.TEST_PATH, config, transform=test_transforms)
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=config.BATCH_SIZE, 
+            shuffle=False,
+            num_workers=config.NUM_WORKERS, 
+            pin_memory=True
+        )
         
-        # Perform misclassification analysis if requested
-        if args.analyze_misclassifications:
-            logger.info("Performing misclassification analysis...")
-            timestamp = time.strftime('%Y%m%d_%H%M%S')
-            misclass_path = os.path.join(config.RESULTS_DIR, f"misclassifications_{timestamp}.json")
-            
-            # Load dataset to get file mapping
-            test_dataset = TestDatasetPT(
-                root_dir=config.TEST_PATH,
-                config=config,
-                transform=TestDataAugmentation(config).get_test_transforms()
-            )
-            
-            analyze_misclassifications(
-                labels, predictions, probabilities, 
-                config.CLASS_NAMES, test_dataset.file_mapping, 
-                misclass_path
-            )
+        logger.info(f"Test dataset loaded: {len(test_dataset)} samples")
         
-        logger.info("\n" + "=" * 60)
-        logger.info("TESTING COMPLETED SUCCESSFULLY!")
-        logger.info("=" * 60)
-        logger.info(f"Final Results:")
-        logger.info(f"  Overall Accuracy: {metrics['overall_accuracy']:.4f}")
-        logger.info(f"  Overall MCC: {metrics['overall_mcc']:.4f}")
-        logger.info(f"  Macro F1-Score: {metrics['f1_macro']:.4f}")
-        logger.info(f"Results saved to: {config.RESULTS_DIR}")
-        logger.info("=" * 60)
+        # Load model
+        model = load_model(config.MODEL_PATH, config)
+        
+        # Evaluate model
+        predictions, labels, probabilities = evaluate_model(model, test_loader, config)
+        
+        # Calculate metrics
+        metrics = calculate_metrics(predictions, labels, probabilities, config)
+        
+        # Print results
+        print_results(metrics, config)
+        
+        # Save results
+        save_results(metrics, config)
+        
+        logger.info("Testing completed successfully!")
         
     except Exception as e:
-        logger.error(f"Error during testing: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    
-    return 0
+        logger.error(f"Testing failed: {e}")
+        raise
 
 if __name__ == '__main__':
-    exit(main())
+    main()

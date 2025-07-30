@@ -1,0 +1,32 @@
+DEEPFAKE DETECTION MODEL EVALUATION RESULTS
+==================================================
+
+Overall Accuracy: 0.8184
+Multiclass MCC: 0.7451
+ROC AUC (macro): 0.9724
+
+Per-Class Performance:
+
+real:
+  Accuracy:  0.9942
+  MCC:       0.7390
+  Precision: 0.7014
+  Recall:    0.9942
+  F1-Score:  0.8225
+  Support:   5000
+
+semi-synthetic:
+  Accuracy:  0.5956
+  MCC:       0.6081
+  Precision: 0.8543
+  Recall:    0.5956
+  F1-Score:  0.7019
+  Support:   5000
+
+synthetic:
+  Accuracy:  0.8654
+  MCC:       0.8841
+  Precision: 0.9774
+  Recall:    0.8654
+  F1-Score:  0.9180
+  Support:   5000
