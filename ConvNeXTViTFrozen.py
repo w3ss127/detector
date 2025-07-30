@@ -25,7 +25,6 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import time
 import math
-import sys  # Added for command-line argument handling
 
 warnings.filterwarnings('ignore')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,7 +39,7 @@ class EnhancedConfig:
         self.NUM_CLASSES = 3
         self.HIDDEN_DIM = 1024
         self.DROPOUT_RATE = 0.3
-        self.FREEZE_BACKBONES = True
+        self.UNFREEZE_BACKBONES = True
         self.ATTENTION_DROPOUT = 0.1
         self.USE_SPECTRAL_NORM = True
         self.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,15 +54,15 @@ class EnhancedConfig:
         self.IMAGE_SIZE = 224
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
-        self.ADAMW_LR = 1e-4
-        self.SGD_LR = 1e-5
+        self.ADAMW_LR = 3e-4
+        self.SGD_LR = 5e-6
         self.SGD_MOMENTUM = 0.9
         self.SGD_WEIGHT_DECAY = 1e-4
         self.WEIGHT_DECAY = 1e-2
-        self.FOCAL_ALPHA = [1.0, 3.0, 2.0]
+        self.FOCAL_ALPHA = [1.5, 2.5, 2.0]
         self.FOCAL_GAMMA = 2.0
         self.LABEL_SMOOTHING = 0.1
-        self.CHECKPOINT_DIR = "frozen_checkpoints"
+        self.CHECKPOINT_DIR = "progressive_unfreeze_checkpoints"
         self.CHECKPOINT_EVERY_N_EPOCHS = 5
         self.USE_MIXUP = True
         self.USE_CUTMIX = True
@@ -73,12 +72,12 @@ class EnhancedConfig:
         self.CUTMIX_PROB = 0.5
         self.SWITCH_PROB = 0.5
         self.TRAINING_STAGES = {
-            1: {'epochs': (1, 5), 'freeze_backbone': 'full', 'optimizer': 'adamw'},
-            2: {'epochs': (6, 15), 'freeze_backbone': 'classifiers', 'optimizer': 'adamw'},
-            3: {'epochs': (16, 25), 'freeze_backbone': 'vit', 'optimizer': 'adamw'},
-            4: {'epochs': (26, 35), 'freeze_backbone': 'convnext', 'optimizer': 'adamw'},
-            5: {'epochs': (36, 45), 'freeze_backbone': 'none', 'optimizer': 'adamw'},
-            6: {'epochs': (46, 50), 'freeze_backbone': 'none', 'optimizer': 'sgd'}
+            1: {'epochs': (1, 5), 'unfreeze_backbone': 'classifiers', 'optimizer': 'adamw'},
+            2: {'epochs': (6, 10), 'unfreeze_backbone': 'convnext_last', 'optimizer': 'adamw'},
+            3: {'epochs': (11, 20), 'unfreeze_backbone': 'convnext', 'optimizer': 'adamw'},
+            4: {'epochs': (21, 30), 'unfreeze_backbone': 'vit', 'optimizer': 'adamw'},
+            5: {'epochs': (31, 40), 'unfreeze_backbone': 'all', 'optimizer': 'adamw'},
+            6: {'epochs': (41, 50), 'unfreeze_backbone': 'all', 'optimizer': 'sgd'}
         }
 
     def get_current_stage(self, epoch):
@@ -127,11 +126,6 @@ class MixUpCutMixCollator:
             targets = torch.tensor(targets, dtype=torch.long)
             targets_onehot = F.one_hot(targets, num_classes=self.num_classes).float()
             
-            # Ensure batch is valid
-            if images.shape[0] == 0 or images.shape[1] != 3:
-                logger.warning(f"Invalid batch shape: {images.shape}")
-                return None, None
-            
             use_mixup = self.config.USE_MIXUP and np.random.rand() < self.mixup_prob
             use_cutmix = self.config.USE_CUTMIX and np.random.rand() < self.cutmix_prob
             
@@ -146,7 +140,7 @@ class MixUpCutMixCollator:
             return images, targets_onehot
         except Exception as e:
             logger.error(f"Error in MixUpCutMixCollator: {e}")
-            return None, None  # Return None to skip invalid batches
+            return images, targets_onehot
 
     def _mixup(self, images, targets):
         """Apply MixUp augmentation."""
@@ -221,9 +215,6 @@ class SpectralNorm(nn.Module):
         v = getattr(self.module, self.name + "_v")
         w = getattr(self.module, self.name + "_bar")
         w_shape = w.shape
-        if len(w_shape) not in [2, 4]:
-            logger.warning(f"Unsupported weight shape {w_shape} for spectral normalization")
-            return
         height = w_shape[0]
         width = w_shape[1] * w_shape[2] * w_shape[3] if len(w_shape) == 4 else w_shape[1]
         w_reshaped = w.view(height, -1)
@@ -250,9 +241,6 @@ class SpectralNorm(nn.Module):
     def _make_params(self):
         w = getattr(self.module, self.name)
         w_shape = w.shape
-        if len(w_shape) not in [2, 4]:
-            logger.warning(f"Unsupported weight shape {w_shape} for spectral normalization")
-            return
         height = w_shape[0]
         width = w_shape[1] * w_shape[2] * w_shape[3] if len(w_shape) == 4 else w_shape[1]
         u = nn.Parameter(torch.randn(height).normal_(0, 1), requires_grad=False)
@@ -265,9 +253,9 @@ class SpectralNorm(nn.Module):
         self.module.register_parameter(self.name + "_v", v)
         self.module.register_parameter(self.name + "_bar", w_bar)
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args):
         self._update_u_v()
-        return self.module.forward(*args, **kwargs)
+        return self.module.forward(*args)
 
 class EnhancedAttentionModule(nn.Module):
     """Attention module with channel and spatial attention."""
@@ -315,20 +303,18 @@ class EnhancedConvNextViTModel(nn.Module):
         
         self.vit = timm.create_model('vit_base_patch16_224', pretrained=config.PRETRAINED_WEIGHTS is not None, num_classes=0)
         
-        # Access the classifier's in_features safely
-        convnext_features = None
-        for module in self.convnext.modules():  # Iterate through all modules
+        for module in self.convnext.classifier:
             if isinstance(module, nn.Linear):
                 convnext_features = module.in_features
                 break
-        if convnext_features is None:
+        else:
             raise AttributeError("No Linear layer found in ConvNeXt classifier")
         
         vit_features = self.vit.num_features
         self.backbone_params = {'convnext': list(self.convnext.parameters()), 'vit': list(self.vit.parameters())}
         
-        if config.FREEZE_BACKBONES:
-            self.set_freeze_strategy('full')
+        if config.UNFREEZE_BACKBONES:
+            self.set_unfreeze_strategy('classifiers')
         
         self.attention_module = EnhancedAttentionModule(channels=convnext_features + vit_features, config=config)
         self.fusion = nn.Sequential(
@@ -338,24 +324,37 @@ class EnhancedConvNextViTModel(nn.Module):
             nn.utils.spectral_norm(nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)) if config.USE_SPECTRAL_NORM else nn.Linear(config.HIDDEN_DIM, config.NUM_CLASSES)
         )
 
-    def set_freeze_strategy(self, strategy):
-        """Set backbone freezing strategy based on stage configuration."""
+    def set_unfreeze_strategy(self, strategy):
+        """Set backbone unfreezing strategy based on stage configuration."""
+        # First, freeze all backbone parameters
         for param in self.backbone_params['convnext'] + self.backbone_params['vit']:
             param.requires_grad = False
         
-        if strategy == 'none':
-            for param in self.backbone_params['convnext'] + self.backbone_params['vit']:
-                param.requires_grad = True
-        elif strategy == 'classifiers':
+        if strategy == 'classifiers':
+            # Unfreeze only the ConvNeXt classifier
             for param in self.convnext.classifier.parameters():
                 param.requires_grad = True
+        elif strategy == 'convnext_last':
+            # Unfreeze ConvNeXt classifier and last stage
+            for param in self.convnext.classifier.parameters():
+                param.requires_grad = True
+            for param in self.convnext.features[-1].parameters():
+                param.requires_grad = True
         elif strategy == 'convnext':
+            # Unfreeze entire ConvNeXt backbone
             for param in self.backbone_params['convnext']:
                 param.requires_grad = True
         elif strategy == 'vit':
+            # Unfreeze entire ViT backbone, keep ConvNeXt unfrozen
+            for param in self.backbone_params['convnext']:
+                param.requires_grad = True
             for param in self.backbone_params['vit']:
                 param.requires_grad = True
-        logger.info(f"Set backbone freeze strategy: {strategy}")
+        elif strategy == 'all':
+            # Unfreeze all parameters
+            for param in self.parameters():
+                param.requires_grad = True
+        logger.info(f"Set backbone unfreeze strategy: {strategy}")
 
     def forward(self, x):
         convnext_feats = self.convnext.features(x)
@@ -390,9 +389,6 @@ class EnhancedCustomDatasetPT(Dataset):
                 logger.warning(f"Class directory {class_dir} does not exist")
                 continue
             pt_files = list(class_dir.glob('*.pt'))
-            if not pt_files:
-                logger.warning(f"No .pt files found in {class_dir}")
-                continue
             for pt_file in pt_files:
                 try:
                     tensor_data = torch.load(pt_file, map_location='cpu')
@@ -401,9 +397,6 @@ class EnhancedCustomDatasetPT(Dataset):
                     if tensor_data.dim() < 4 or tensor_data.shape[1] != 3:
                         logger.warning(f"Invalid tensor shape in {pt_file}: {tensor_data.shape}")
                         continue
-                    if tensor_data.shape[2] != self.config.IMAGE_SIZE or tensor_data.shape[3] != self.config.IMAGE_SIZE:
-                        logger.warning(f"Unexpected image size in {pt_file}: {tensor_data.shape[2:]}")
-                        continue
                     for i in range(tensor_data.shape[0]):
                         self.labels.append(class_idx)
                         self.file_mapping.append((str(pt_file), i))
@@ -411,7 +404,6 @@ class EnhancedCustomDatasetPT(Dataset):
                         class_counts[class_name] += 1
                 except Exception as e:
                     logger.error(f"Error loading {pt_file}: {e}")
-                    continue
         logger.info(f"Loaded {len(self.images)} images")
         for class_name, count in class_counts.items():
             if count == 0:
@@ -433,7 +425,6 @@ class EnhancedCustomDatasetPT(Dataset):
             image_tensor = torch.clamp(image_tensor, 0, 1)
             if self.transform:
                 image_np = image_tensor.permute(1, 2, 0).numpy()
-                # Ensure image is in uint8 format for albumentations
                 if image_np.max() <= 1.0:
                     image_np = (image_np * 255).astype(np.uint8)
                 transformed = self.transform(image=image_np)
@@ -539,23 +530,30 @@ def create_optimizer(model, config, optimizer_type='adamw'):
     """Create optimizer based on type."""
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     if not trainable_params:
-        raise ValueError("No trainable parameters found for optimizer")
+        logger.warning("No trainable parameters found for optimizer")
     if optimizer_type == 'adamw':
         return optim.AdamW(trainable_params, lr=config.ADAMW_LR, weight_decay=config.WEIGHT_DECAY)
     elif optimizer_type == 'sgd':
         return optim.SGD(trainable_params, lr=config.SGD_LR, momentum=config.SGD_MOMENTUM, weight_decay=config.SGD_WEIGHT_DECAY)
     raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
 
-def train_model(local_rank, world_size, config, resume_from=None):
+def train_model(config, resume_from=None):
     """Main training function with staged training."""
+    local_rank = -1
+    world_size = 1
     if config.DISTRIBUTED:
         try:
-            setup_distributed(local_rank, world_size, config.BACKEND, config.MASTER_ADDR, config.MASTER_PORT)
-            config.DEVICE = torch.device(f'cuda:{local_rank}')
+            local_rank = int(os.environ.get('LOCAL_RANK', -1))
+            world_size = int(os.environ.get('WORLD_SIZE', 1))
+            if local_rank == -1 or world_size <= 1:
+                logger.warning("Invalid distributed training configuration. Falling back to single-GPU.")
+                config.DISTRIBUTED = False
+            else:
+                setup_distributed(local_rank, world_size, config.BACKEND, config.MASTER_ADDR, find_free_port(int(config.MASTER_PORT)))
+                config.DEVICE = torch.device(f'cuda:{local_rank}')
         except Exception as e:
             logger.error(f"Distributed training failed: {e}. Falling back to single-GPU.")
             config.DISTRIBUTED = False
-            local_rank = -1
 
     torch.manual_seed(42)
     np.random.seed(42)
@@ -580,10 +578,10 @@ def train_model(local_rank, world_size, config, resume_from=None):
     
     if resume_from:
         try:
-            start_epoch, current_stage, best_val_acc, freeze_strategy, current_optimizer_type = load_staged_checkpoint(model, optimizer, resume_from, config)
+            start_epoch, current_stage, best_val_acc, unfreeze_strategy, current_optimizer_type = load_staged_checkpoint(model, optimizer, resume_from, config)
             model_to_modify = model.module if isinstance(model, DDP) else model
-            model_to_modify.set_freeze_strategy(freeze_strategy)
-            config.FREEZE_BACKBONES = (freeze_strategy != 'none')
+            model_to_modify.set_unfreeze_strategy(unfreeze_strategy)
+            config.UNFREEZE_BACKBONES = True
             optimizer = create_optimizer(model, config, current_optimizer_type)
             scaler = GradScaler(enabled=config.USE_AMP)
             logger.info(f"Resumed training from epoch {start_epoch}, stage {current_stage}")
@@ -593,10 +591,10 @@ def train_model(local_rank, world_size, config, resume_from=None):
             current_stage = 1
             best_val_acc = 0.0
     
-    logger.info(f"Starting training with {config.EPOCHS} epochs in 6 stages")
+    logger.info(f"Starting training with {config.EPOCHS} epochs in 5 stages")
     for stage, stage_config in config.TRAINING_STAGES.items():
         logger.info(f"Stage {stage} (epochs {stage_config['epochs'][0]}-{stage_config['epochs'][1]}): "
-                    f"Freeze={stage_config['freeze_backbone']}, Optimizer={stage_config['optimizer'].upper()}")
+                    f"Unfreeze={stage_config['unfreeze_backbone']}, Optimizer={stage_config['optimizer'].upper()}")
     
     for epoch in range(start_epoch, config.EPOCHS + 1):
         stage_num, stage_config = config.get_current_stage(epoch)
@@ -610,8 +608,8 @@ def train_model(local_rank, world_size, config, resume_from=None):
             logger.info(f"{'='*60}")
             current_stage = stage_num
             model_to_modify = model.module if isinstance(model, DDP) else model
-            model_to_modify.set_freeze_strategy(stage_config['freeze_backbone'])
-            config.FREEZE_BACKBONES = (stage_config['freeze_backbone'] != 'none')
+            model_to_modify.set_unfreeze_strategy(stage_config['unfreeze_backbone'])
+            config.UNFREEZE_BACKBONES = True
             
             if stage_config['optimizer'] != current_optimizer_type:
                 current_optimizer_type = stage_config['optimizer']
@@ -620,7 +618,7 @@ def train_model(local_rank, world_size, config, resume_from=None):
                 scaler = GradScaler(enabled=config.USE_AMP)
             
             logger.info(f"Stage {stage_num} configuration:")
-            logger.info(f"  - Backbone frozen: {stage_config['freeze_backbone']}")
+            logger.info(f"  - Backbone unfrozen: {stage_config['unfreeze_backbone']}")
             logger.info(f"  - Optimizer: {current_optimizer_type.upper()}")
             logger.info(f"  - Learning rate: {config.ADAMW_LR if current_optimizer_type == 'adamw' else config.SGD_LR}")
             if current_optimizer_type == 'sgd':
@@ -631,14 +629,13 @@ def train_model(local_rank, world_size, config, resume_from=None):
         train_correct = 0
         train_total = 0
         
-        # Disable tqdm for non-rank-0 processes in distributed training
-        pbar = tqdm(train_loader, desc=f'Stage {stage_num}, Epoch {epoch}/{config.EPOCHS}', disable=(config.DISTRIBUTED and local_rank != 0))
+        pbar = tqdm(train_loader, desc=f'Stage {stage_num}, Epoch {epoch}/{config.EPOCHS}')
         for batch_idx, (data, target) in enumerate(pbar):
             if data is None or target is None:
                 logger.warning(f"Skipping invalid batch {batch_idx}")
                 continue
             data, target = data.to(config.DEVICE), target.to(config.DEVICE)
-            optimizer.zero_grad(set_to_none=True)  # Optimize memory usage
+            optimizer.zero_grad()
             
             with autocast(enabled=config.USE_AMP):
                 output = model(data)
@@ -663,14 +660,13 @@ def train_model(local_rank, world_size, config, resume_from=None):
             elif config.USE_CUTMIX:
                 augmentation_info = "CutMix"
             
-            if not (config.DISTRIBUTED and local_rank != 0):
-                pbar.set_postfix({
-                    'Loss': f'{train_loss/(batch_idx+1):.4f}',
-                    'Acc': f'{train_acc:.4f}',
-                    'Opt': current_optimizer_type.upper(),
-                    'Aug': augmentation_info,
-                    'Freeze': stage_config['freeze_backbone']
-                })
+            pbar.set_postfix({
+                'Loss': f'{train_loss/(batch_idx+1):.4f}',
+                'Acc': f'{train_acc:.4f}',
+                'Opt': current_optimizer_type.upper(),
+                'Aug': augmentation_info,
+                'Unfreeze': stage_config['unfreeze_backbone']
+            })
         
         model.eval()
         with torch.no_grad():
@@ -690,10 +686,9 @@ def train_model(local_rank, world_size, config, resume_from=None):
             train_loss /= len(train_loader)
             train_acc = train_correct / train_total
             
-            if not (config.DISTRIBUTED and local_rank != 0):
-                logger.info(f"Stage {stage_num}, Epoch {epoch}: "
-                           f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                           f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+            logger.info(f"Stage {stage_num}, Epoch {epoch}: "
+                       f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                       f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
             
             if config.DISTRIBUTED and local_rank != 0:
                 continue
@@ -707,7 +702,7 @@ def train_model(local_rank, world_size, config, resume_from=None):
                     'stage': stage_num,
                     'val_acc': val_acc,
                     'train_acc': train_acc,
-                    'backbone_frozen': stage_config['freeze_backbone'],
+                    'backbone_unfrozen': stage_config['unfreeze_backbone'],
                     'optimizer_type': current_optimizer_type
                 }, best_model_path)
                 logger.info(f"Saved best model with Val Acc: {best_val_acc:.4f} at {best_model_path}")
@@ -723,7 +718,7 @@ def train_model(local_rank, world_size, config, resume_from=None):
                     'stage': stage_num,
                     'val_acc': val_acc,
                     'train_acc': train_acc,
-                    'backbone_frozen': stage_config['freeze_backbone'],
+                    'backbone_unfrozen': stage_config['unfreeze_backbone'],
                     'optimizer_type': current_optimizer_type
                 }, periodic_path)
                 logger.info(f"Saved periodic checkpoint at {periodic_path}")
@@ -738,7 +733,7 @@ def train_model(local_rank, world_size, config, resume_from=None):
             'stage': 5,
             'val_acc': val_acc,
             'train_acc': train_acc,
-            'backbone_frozen': stage_config['freeze_backbone'],
+            'backbone_unfrozen': stage_config['unfreeze_backbone'],
             'optimizer_type': current_optimizer_type
         }, final_model_path)
         logger.info(f"Saved final model at {final_model_path}")
@@ -762,30 +757,29 @@ def load_staged_checkpoint(model, optimizer, checkpoint_path, config):
     try:
         checkpoint = torch.load(checkpoint_path, map_location=config.DEVICE)
         required_keys = ['model_state_dict', 'optimizer_state_dict', 'epoch', 'stage', 'val_acc']
-        missing_keys = [key for key in required_keys if key not in checkpoint]
-        if missing_keys:
-            logger.warning(f"Checkpoint missing keys: {missing_keys}. Using default values.")
-        model.load_state_dict(checkpoint.get('model_state_dict', {}))
-        optimizer.load_state_dict(checkpoint.get('optimizer_state_dict', {}))
-        epoch = checkpoint.get('epoch', 1)
-        stage = checkpoint.get('stage', 1)
-        val_acc = checkpoint.get('val_acc', 0.0)
+        if not all(key in checkpoint for key in required_keys):
+            raise KeyError("Checkpoint missing required keys")
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epoch = checkpoint['epoch']
+        stage = checkpoint['stage']
+        val_acc = checkpoint['val_acc']
         train_acc = checkpoint.get('train_acc', 0.0)
-        backbone_frozen = checkpoint.get('backbone_frozen', 'full')
+        backbone_unfrozen = checkpoint.get('backbone_unfrozen', 'classifiers')
         optimizer_type = checkpoint.get('optimizer_type', 'adamw')
         logger.info(f"Loaded checkpoint from epoch {epoch}, stage {stage}")
         logger.info(f"  - Validation accuracy: {val_acc:.4f}")
         logger.info(f"  - Training accuracy: {train_acc:.4f}")
-        logger.info(f"  - Backbone frozen: {backbone_frozen}")
+        logger.info(f"  - Backbone unfrozen: {backbone_unfrozen}")
         logger.info(f"  - Optimizer type: {optimizer_type}")
-        return epoch, stage, val_acc, backbone_frozen, optimizer_type
+        return epoch, stage, val_acc, backbone_unfrozen, optimizer_type
     except Exception as e:
         logger.error(f"Error loading checkpoint {checkpoint_path}: {e}")
         raise
 
-def main(local_rank=-1, world_size=1):
+def main():
     """Main function with argument parsing."""
-    parser = argparse.ArgumentParser(description='Staged Deepfake Detection Training with MixUp/CutMix')
+    parser = argparse.ArgumentParser(description='Staged Deepfake Detection Training with Progressive Unfreezing and MixUp/CutMix')
     parser.add_argument('--data-path', type=str, default='datasets/train')
     parser.add_argument('--batch-size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=50)
@@ -793,7 +787,7 @@ def main(local_rank=-1, world_size=1):
     parser.add_argument('--sgd-lr', type=float, default=1e-4)
     parser.add_argument('--sgd-momentum', type=float, default=0.9)
     parser.add_argument('--no-distributed', action='store_true')
-    parser.add_argument('--checkpoint-dir', type=str, default='frozen_checkpoints')
+    parser.add_argument('--checkpoint-dir', type=str, default='progressive_unfreeze_checkpoints')
     parser.add_argument('--checkpoint-every-n-epochs', type=int, default=5)
     parser.add_argument('--resume-from', type=str, default=None)
     parser.add_argument('--no-mixup', action='store_true')
@@ -804,8 +798,7 @@ def main(local_rank=-1, world_size=1):
     parser.add_argument('--cutmix-prob', type=float, default=0.5)
     parser.add_argument('--switch-prob', type=float, default=0.5)
     
-    # Handle cases where arguments are not provided (e.g., in notebooks)
-    args = parser.parse_args(sys.argv[1:]) if len(sys.argv) > 1 else parser.parse_args([])
+    args = parser.parse_args()
     
     config = EnhancedConfig()
     config.TRAIN_PATH = args.data_path
@@ -825,10 +818,6 @@ def main(local_rank=-1, world_size=1):
     config.CUTMIX_PROB = args.cutmix_prob
     config.SWITCH_PROB = args.switch_prob
     
-    # Find a free port before setting up distributed training
-    if config.DISTRIBUTED:
-        config.MASTER_PORT = str(find_free_port(int(config.MASTER_PORT)))
-    
     try:
         config.validate()
     except AssertionError as e:
@@ -839,7 +828,7 @@ def main(local_rank=-1, world_size=1):
     logger.info("Staged Training Configuration:")
     for stage, stage_config in config.TRAINING_STAGES.items():
         logger.info(f"  - Stage {stage} (epochs {stage_config['epochs'][0]}-{stage_config['epochs'][1]}): "
-                    f"Freeze={stage_config['freeze_backbone']}, Optimizer={stage_config['optimizer'].upper()}")
+                    f"Unfreeze={stage_config['unfreeze_backbone']}, Optimizer={stage_config['optimizer'].upper()}")
     
     logger.info("Data Augmentation Configuration:")
     logger.info(f"  - MixUp: {'Enabled' if config.USE_MIXUP else 'Disabled'}")
@@ -855,8 +844,8 @@ def main(local_rank=-1, world_size=1):
         logger.info(f"Resuming from checkpoint: {args.resume_from}")
     
     try:
-        history, _ = train_model(local_rank, world_size, config, resume_from=args.resume_from)
-        logger.info("Staged training with MixUp/CutMix completed successfully!")
+        history, _ = train_model(config, resume_from=args.resume_from)
+        logger.info("Staged training with progressive unfreezing and MixUp/CutMix completed successfully!")
     except Exception as e:
         logger.error(f"Training failed: {e}")
         cleanup_distributed()
@@ -864,9 +853,4 @@ def main(local_rank=-1, world_size=1):
     return history
 
 if __name__ == '__main__':
-    config = EnhancedConfig()
-    world_size = torch.cuda.device_count() if config.DISTRIBUTED else 1
-    if config.DISTRIBUTED:
-        mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)
-    else:
-        main()
+    main()

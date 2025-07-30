@@ -70,8 +70,8 @@ class SuperiorConfig:
         self.IMAGE_SIZE = 224
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
-        self.UNFREEZE_EPOCHS = [5, 10, 15, 20, 50]
-        self.FINE_TUNE_START_EPOCH = 20
+        self.UNFREEZE_EPOCHS = [1,6, 16, 26, 36]
+        self.FINE_TUNE_START_EPOCH = 41
         self.EARLY_STOPPING_PATIENCE = 8
         self.ADAMW_LR = 3e-4
         self.SGD_LR = 5e-6
@@ -1165,8 +1165,8 @@ def main():
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--sgd_lr', type=float, default=5e-6)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
-    parser.add_argument('--fine_tune_start', type=int, default=15)
-    parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[10, 20, 30, 40, 50])
+    parser.add_argument('--fine_tune_start', type=int, default=41)
+    parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[1, 6, 16, 26, 36])
     parser.add_argument('--early_stopping_patience', type=int, default=8)
     parser.add_argument('--checkpoint_dir', type=str, default='superior_checkpoints')
     parser.add_argument('--checkpoint_every_n_epochs', type=int, default=3)
@@ -1206,7 +1206,7 @@ def main():
     config.MASTER_ADDR = args.master_addr
     config.MASTER_PORT = args.master_port
     config.FOCAL_ALPHA = torch.tensor([1.0, 3.0, 2.5]).to(config.DEVICE)
-    config.CLASS_WEIGHTS = torch.tensor([1.0, 4.0, 2.0]).to(config.DEVICE)
+    config.CLASS_WEIGHTS = torch.tensor([1.0, 3.0, 2.0]).to(config.DEVICE)
     config.validate()
     if config.DISTRIBUTED and torch.cuda.device_count() > 1:
         master_port = find_free_port(int(config.MASTER_PORT))

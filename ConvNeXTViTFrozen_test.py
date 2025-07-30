@@ -479,7 +479,7 @@ def save_results(metrics, config, output_path=None):
 def main():
     """Main testing function."""
     parser = argparse.ArgumentParser(description='Test Deepfake Detection Model')
-    parser.add_argument('--model-path', type=str, default="./model_stage5_epoch40_20250730_041524.pth",
+    parser.add_argument('--model-path', type=str, default="progressive_unfreeze_checkpoints/model_stage2_epoch10_20250730_152546.pth",
                         help='Path to trained model checkpoint')
     parser.add_argument('--test-path', type=str, default='datasets/test',
                         help='Path to test dataset directory')

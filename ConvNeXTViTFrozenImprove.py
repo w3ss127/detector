@@ -72,11 +72,11 @@ class EnhancedConfig:
         self.CUTMIX_PROB = 0.5
         self.SWITCH_PROB = 0.5
         self.TRAINING_STAGES = {
-            1: {'epochs': (1, 5), 'freeze_backbone': 'full', 'optimizer': 'adamw'},
-            2: {'epochs': (6, 15), 'freeze_backbone': 'classifiers+vit', 'optimizer': 'adamw'},
-            3: {'epochs': (16, 25), 'freeze_backbone': 'convnext', 'optimizer': 'adamw'},
-            4: {'epochs': (26, 40), 'freeze_backbone': 'none', 'optimizer': 'adamw'},
-            5: {'epochs': (41, 50), 'freeze_backbone': 'none', 'optimizer': 'sgd'}
+            1: {'epochs': (1, 5), 'unfreeze_backbone': 'full', 'optimizer': 'adamw'},
+            2: {'epochs': (6, 20), 'unfreeze_backbone': 'convnext', 'optimizer': 'adamw'},
+            3: {'epochs': (21, 30), 'unfreeze_backbone': 'vit', 'optimizer': 'adamw'},
+            4: {'epochs': (31, 40), 'unfreeze_backbone': 'none', 'optimizer': 'adamw'},
+            5: {'epochs': (41, 50), 'unfreeze_backbone': 'none', 'optimizer': 'sgd'}
         }
 
     def get_current_stage(self, epoch):
