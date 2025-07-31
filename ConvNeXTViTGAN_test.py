@@ -71,7 +71,7 @@ class TestDataset(SuperiorDataset):
             logger.warning(f"Error loading image at {file_path}[{image_idx}]: {e}")
             return torch.zeros(3, self.config.IMAGE_SIZE, self.config.IMAGE_SIZE), -1, (file_path, image_idx)
 
-def test_individual_images(config, checkpoint_path="superior_checkpoints/best_superior_model.pth"):
+def test_individual_images(config, checkpoint_path="gan_checkpoints/best_superior_model.pth"):
     """Test individual images from the test dataset and print results."""
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

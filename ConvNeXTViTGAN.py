@@ -71,7 +71,7 @@ class SuperiorConfig:
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
         self.UNFREEZE_EPOCHS = [1,6, 16, 26, 36]
-        self.FINE_TUNE_START_EPOCH = 41
+        self.FINE_TUNE_START_EPOCH = 26
         self.EARLY_STOPPING_PATIENCE = 8
         self.ADAMW_LR = 3e-4
         self.SGD_LR = 5e-6
@@ -80,7 +80,7 @@ class SuperiorConfig:
         self.FOCAL_ALPHA = torch.tensor([1.0, 3.0, 2.5]).to(self.DEVICE)
         self.FOCAL_GAMMA = 3.5
         self.LABEL_SMOOTHING = 0.15
-        self.CLASS_WEIGHTS = torch.tensor([1.0, 3.0, 2.0]).to(self.DEVICE)
+        self.CLASS_WEIGHTS = torch.tensor([1.0, 1.0, 1.0]).to(self.DEVICE)
         self.USE_FORENSICS_MODULE = True
         self.USE_UNCERTAINTY_ESTIMATION = True
         self.USE_MIXUP = True
@@ -93,7 +93,7 @@ class SuperiorConfig:
         self.EVIDENTIAL_WEIGHT = 0.3
         self.BOUNDARY_WEIGHT = 0.2
         self.TRIPLET_WEIGHT = 0.25
-        self.CHECKPOINT_DIR = "superior_checkpoints"
+        self.CHECKPOINT_DIR = "gan_checkpoints"
         self.CHECKPOINT_EVERY_N_EPOCHS = 3
         self.USE_MCC_FOR_BEST_MODEL = True
         self.SAVE_TOP_K_MODELS = 3
@@ -507,47 +507,47 @@ class SuperiorDataset(Dataset):
         self.tensor_cache = {}
         self.real_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            A.HorizontalFlip(p=0.5),
-            A.RandomRotate90(p=0.2),
-            A.ShiftScaleRotate(shift_limit=0.03, scale_limit=0.03, rotate_limit=3, p=0.3),
-            A.RandomBrightnessContrast(brightness_limit=0.08, contrast_limit=0.08, p=0.3),
-            A.HueSaturationValue(hue_shift_limit=3, sat_shift_limit=8, val_shift_limit=8, p=0.3),
-            A.GaussNoise(var_limit=(5.0, 15.0), p=0.2),
+            # A.HorizontalFlip(p=0.5),
+            # A.RandomRotate90(p=0.2),
+            # A.ShiftScaleRotate(shift_limit=0.03, scale_limit=0.03, rotate_limit=3, p=0.3),
+            # A.RandomBrightnessContrast(brightness_limit=0.08, contrast_limit=0.08, p=0.3),
+            # A.HueSaturationValue(hue_shift_limit=3, sat_shift_limit=8, val_shift_limit=8, p=0.3),
+            # A.GaussNoise(var_limit=(5.0, 15.0), p=0.2),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
         self.semi_synthetic_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            A.HorizontalFlip(p=0.5),
-            A.OneOf([
-                A.GridDistortion(num_steps=8, distort_limit=0.15, p=0.4),
-                A.RandomGridShuffle(grid=(4, 4), p=0.3),
-                A.GaussNoise(var_limit=(15.0, 40.0), p=0.3),
-            ], p=0.8),
-            A.OneOf([
-                A.ImageCompression(quality_lower=70, quality_upper=95, p=0.4),
-                A.Blur(blur_limit=3, p=0.3),
-                A.MedianBlur(blur_limit=3, p=0.3),
-            ], p=0.6),
-            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, p=0.4),
-            A.RandomBrightnessContrast(brightness_limit=0.12, contrast_limit=0.12, p=0.4),
-            A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=12, val_shift_limit=12, p=0.4),
-            A.CoarseDropout(max_holes=8, max_height=8, max_width=8, p=0.3),
+            # A.HorizontalFlip(p=0.5),
+            # A.OneOf([
+            #     A.GridDistortion(num_steps=8, distort_limit=0.15, p=0.4),
+            #     A.RandomGridShuffle(grid=(4, 4), p=0.3),
+            #     A.GaussNoise(var_limit=(15.0, 40.0), p=0.3),
+            # ], p=0.8),
+            # A.OneOf([
+            #     A.ImageCompression(quality_lower=70, quality_upper=95, p=0.4),
+            #     A.Blur(blur_limit=3, p=0.3),
+            #     A.MedianBlur(blur_limit=3, p=0.3),
+            # ], p=0.6),
+            # A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, p=0.4),
+            # A.RandomBrightnessContrast(brightness_limit=0.12, contrast_limit=0.12, p=0.4),
+            # A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=12, val_shift_limit=12, p=0.4),
+            # A.CoarseDropout(max_holes=8, max_height=8, max_width=8, p=0.3),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
         self.synthetic_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            A.HorizontalFlip(p=0.5),
-            A.RandomRotate90(p=0.3),
-            A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.08, rotate_limit=8, p=0.4),
-            A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.4),
-            A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=15, val_shift_limit=15, p=0.4),
-            A.OneOf([
-                A.GaussNoise(var_limit=(10.0, 30.0), p=0.3),
-                A.MultiplicativeNoise(multiplier=[0.9, 1.1], p=0.3),
-            ], p=0.5),
-            A.CoarseDropout(max_holes=6, max_height=12, max_width=12, p=0.2),
+            # A.HorizontalFlip(p=0.5),
+            # A.RandomRotate90(p=0.3),
+            # A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.08, rotate_limit=8, p=0.4),
+            # A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.4),
+            # A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=15, val_shift_limit=15, p=0.4),
+            # A.OneOf([
+            #     A.GaussNoise(var_limit=(10.0, 30.0), p=0.3),
+            #     A.MultiplicativeNoise(multiplier=[0.9, 1.1], p=0.3),
+            # ], p=0.5),
+            # A.CoarseDropout(max_holes=6, max_height=12, max_width=12, p=0.2),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
@@ -794,10 +794,10 @@ def progressive_unfreeze_advanced(model, epoch, config):
             model.unfreeze_classifier()
             unfroze_this_epoch = True
         elif unfreeze_stage == 3:
-            model.unfreeze_vit_layers()
+            model.unfreeze_convnext_layers()
             unfroze_this_epoch = True
         elif unfreeze_stage == 4:
-            model.unfreeze_convnext_layers()
+            model.unfreeze_vit_layers()
             unfroze_this_epoch = True
         elif unfreeze_stage == 5:
             model.unfreeze_vit_layers()
@@ -1165,10 +1165,10 @@ def main():
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--sgd_lr', type=float, default=5e-6)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
-    parser.add_argument('--fine_tune_start', type=int, default=41)
+    parser.add_argument('--fine_tune_start', type=int, default=26)
     parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[1, 6, 16, 26, 36])
     parser.add_argument('--early_stopping_patience', type=int, default=8)
-    parser.add_argument('--checkpoint_dir', type=str, default='superior_checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='gan_checkpoints')
     parser.add_argument('--checkpoint_every_n_epochs', type=int, default=3)
     parser.add_argument('--no_mixup', action='store_true')
     parser.add_argument('--no_cutmix', action='store_true')

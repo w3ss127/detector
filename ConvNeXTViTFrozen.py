@@ -62,7 +62,7 @@ class EnhancedConfig:
         self.FOCAL_ALPHA = [1.5, 2.5, 2.0]
         self.FOCAL_GAMMA = 2.0
         self.LABEL_SMOOTHING = 0.1
-        self.CHECKPOINT_DIR = "progressive_unfreeze_checkpoints"
+        self.CHECKPOINT_DIR = "frozen_checkpoints"
         self.CHECKPOINT_EVERY_N_EPOCHS = 5
         self.USE_MIXUP = True
         self.USE_CUTMIX = True
@@ -76,7 +76,7 @@ class EnhancedConfig:
             2: {'epochs': (6, 10), 'unfreeze_backbone': 'convnext_last', 'optimizer': 'adamw'},
             3: {'epochs': (11, 20), 'unfreeze_backbone': 'convnext', 'optimizer': 'adamw'},
             4: {'epochs': (21, 30), 'unfreeze_backbone': 'vit', 'optimizer': 'adamw'},
-            5: {'epochs': (31, 40), 'unfreeze_backbone': 'all', 'optimizer': 'adamw'},
+            5: {'epochs': (31, 40), 'unfreeze_backbone': 'all', 'optimizer': 'sgd'},
             6: {'epochs': (41, 50), 'unfreeze_backbone': 'all', 'optimizer': 'sgd'}
         }
 
@@ -787,7 +787,7 @@ def main():
     parser.add_argument('--sgd-lr', type=float, default=1e-4)
     parser.add_argument('--sgd-momentum', type=float, default=0.9)
     parser.add_argument('--no-distributed', action='store_true')
-    parser.add_argument('--checkpoint-dir', type=str, default='progressive_unfreeze_checkpoints')
+    parser.add_argument('--checkpoint-dir', type=str, default='frozen_checkpoints')
     parser.add_argument('--checkpoint-every-n-epochs', type=int, default=5)
     parser.add_argument('--resume-from', type=str, default=None)
     parser.add_argument('--no-mixup', action='store_true')
