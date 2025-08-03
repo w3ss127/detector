@@ -32,6 +32,19 @@ from collections import defaultdict
 
 warnings.filterwarnings('ignore')
 
+# CRITICAL FIX: Set multiprocessing start method to 'spawn' for CUDA compatibility
+def set_multiprocessing_start_method():
+    """Set the multiprocessing start method to 'spawn' for CUDA compatibility."""
+    try:
+        if mp.get_start_method(allow_none=True) != 'spawn':
+            mp.set_start_method('spawn', force=True)
+            print("Set multiprocessing start method to 'spawn' for CUDA compatibility")
+    except RuntimeError as e:
+        if "context has already been set" in str(e):
+            print("Multiprocessing context already set")
+        else:
+            raise e
+
 # Custom formatter for logging with rank
 class RankFormatter(logging.Formatter):
     def format(self, record):
@@ -70,17 +83,17 @@ class SuperiorConfig:
         self.IMAGE_SIZE = 224
         self.CLASS_NAMES = ["real", "semi-synthetic", "synthetic"]
         self.NUM_WORKERS = 4
-        self.UNFREEZE_EPOCHS = [1,6, 16, 26, 36]
+        self.UNFREEZE_EPOCHS = [1, 6, 16, 26, 36]
         self.FINE_TUNE_START_EPOCH = 26
-        self.EARLY_STOPPING_PATIENCE = 8
+        self.EARLY_STOPPING_PATIENCE = 40
         self.ADAMW_LR = 3e-4
         self.SGD_LR = 5e-6
         self.SGD_MOMENTUM = 0.95
         self.WEIGHT_DECAY = 2e-2
-        self.FOCAL_ALPHA = torch.tensor([1.0, 3.0, 2.5]).to(self.DEVICE)
+        self.FOCAL_ALPHA = torch.tensor([1.0, 3.0, 2.5])  # Will be moved to device later
         self.FOCAL_GAMMA = 3.5
         self.LABEL_SMOOTHING = 0.15
-        self.CLASS_WEIGHTS = torch.tensor([1.0, 1.0, 1.0]).to(self.DEVICE)
+        self.CLASS_WEIGHTS = torch.tensor([1.0, 3.0, 2.0])  # Will be moved to device later
         self.USE_FORENSICS_MODULE = True
         self.USE_UNCERTAINTY_ESTIMATION = True
         self.USE_MIXUP = True
@@ -214,9 +227,9 @@ class SuperiorLoss(nn.Module):
         self.config = config
         self.num_classes = config.NUM_CLASSES
         self.device = config.DEVICE
-        self.focal_alpha = config.FOCAL_ALPHA
+        self.focal_alpha = config.FOCAL_ALPHA.to(config.DEVICE) if hasattr(config.FOCAL_ALPHA, 'to') else config.FOCAL_ALPHA
         self.focal_gamma = config.FOCAL_GAMMA
-        self.class_weights = config.CLASS_WEIGHTS
+        self.class_weights = config.CLASS_WEIGHTS.to(config.DEVICE) if hasattr(config.CLASS_WEIGHTS, 'to') else config.CLASS_WEIGHTS
         self.evidential_weight = config.EVIDENTIAL_WEIGHT
         self.contrastive_weight = config.CONTRASTIVE_WEIGHT
         self.boundary_weight = config.BOUNDARY_WEIGHT
@@ -495,6 +508,7 @@ class MixupCutmixAugmentation:
         else:
             return x, y, y, 1.0
 
+# FIXED: Updated dataset to use num_workers=0 when CUDA is involved
 class SuperiorDataset(Dataset):
     def __init__(self, root_dir, config, transform=None, is_training=True):
         self.root_dir = Path(root_dir)
@@ -507,47 +521,18 @@ class SuperiorDataset(Dataset):
         self.tensor_cache = {}
         self.real_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            # A.HorizontalFlip(p=0.5),
-            # A.RandomRotate90(p=0.2),
-            # A.ShiftScaleRotate(shift_limit=0.03, scale_limit=0.03, rotate_limit=3, p=0.3),
-            # A.RandomBrightnessContrast(brightness_limit=0.08, contrast_limit=0.08, p=0.3),
-            # A.HueSaturationValue(hue_shift_limit=3, sat_shift_limit=8, val_shift_limit=8, p=0.3),
-            # A.GaussNoise(var_limit=(5.0, 15.0), p=0.2),
+     
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
         self.semi_synthetic_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            # A.HorizontalFlip(p=0.5),
-            # A.OneOf([
-            #     A.GridDistortion(num_steps=8, distort_limit=0.15, p=0.4),
-            #     A.RandomGridShuffle(grid=(4, 4), p=0.3),
-            #     A.GaussNoise(var_limit=(15.0, 40.0), p=0.3),
-            # ], p=0.8),
-            # A.OneOf([
-            #     A.ImageCompression(quality_lower=70, quality_upper=95, p=0.4),
-            #     A.Blur(blur_limit=3, p=0.3),
-            #     A.MedianBlur(blur_limit=3, p=0.3),
-            # ], p=0.6),
-            # A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.05, rotate_limit=5, p=0.4),
-            # A.RandomBrightnessContrast(brightness_limit=0.12, contrast_limit=0.12, p=0.4),
-            # A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=12, val_shift_limit=12, p=0.4),
-            # A.CoarseDropout(max_holes=8, max_height=8, max_width=8, p=0.3),
+    
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
         self.synthetic_transform = A.Compose([
             A.Resize(config.IMAGE_SIZE, config.IMAGE_SIZE),
-            # A.HorizontalFlip(p=0.5),
-            # A.RandomRotate90(p=0.3),
-            # A.ShiftScaleRotate(shift_limit=0.08, scale_limit=0.08, rotate_limit=8, p=0.4),
-            # A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=0.4),
-            # A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=15, val_shift_limit=15, p=0.4),
-            # A.OneOf([
-            #     A.GaussNoise(var_limit=(10.0, 30.0), p=0.3),
-            #     A.MultiplicativeNoise(multiplier=[0.9, 1.1], p=0.3),
-            # ], p=0.5),
-            # A.CoarseDropout(max_holes=6, max_height=12, max_width=12, p=0.2),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2()
         ])
@@ -560,7 +545,6 @@ class SuperiorDataset(Dataset):
             self.val_transform = transform
         self._validate_dataset_path()
         self._load_file_mapping()
-        self._balance_dataset()
     
     def _validate_dataset_path(self):
         if not self.root_dir.exists():
@@ -588,8 +572,6 @@ class SuperiorDataset(Dataset):
                     try:
                         if str(pt_file) not in self.tensor_cache:
                             tensor_data = torch.load(pt_file, map_location='cpu')
-                            if isinstance(tensor_data, dict):
-                                tensor_data = tensor_data.get('images', tensor_data.get('data', list(tensor_data.values())[0]))
                             self.tensor_cache[str(pt_file)] = tensor_data
                         num_images = tensor_data.shape[0]
                         for i in range(num_images):
@@ -605,27 +587,6 @@ class SuperiorDataset(Dataset):
         class_counts = np.bincount(self.labels)
         for i, count in enumerate(class_counts):
             logger.info(f"Class {self.class_names[i]}: {count} samples", extra={'rank': 0})
-    
-    def _balance_dataset(self):
-        if not self.is_training:
-            return
-        class_counts = np.bincount(self.labels)
-        max_count = max(class_counts)
-        balanced_indices = []
-        balanced_labels = []
-        for class_idx in range(len(self.class_names)):
-            class_indices = [i for i, label in enumerate(self.labels) if label == class_idx]
-            target_count = int(max_count * 1.5) if class_idx == 1 else max_count
-            oversampled_indices = np.random.choice(class_indices, target_count, replace=True)
-            balanced_indices.extend(oversampled_indices)
-            balanced_labels.extend([class_idx] * target_count)
-        balanced_file_indices = [self.file_indices[i] for i in balanced_indices]
-        self.file_indices = balanced_file_indices
-        self.labels = balanced_labels
-        logger.info(f"Balanced dataset: {len(self.file_indices)} samples", extra={'rank': 0})
-        new_class_counts = np.bincount(self.labels)
-        for i, count in enumerate(new_class_counts):
-            logger.info(f"Balanced class {self.class_names[i]}: {count} samples", extra={'rank': 0})
     
     def __len__(self):
         return len(self.file_indices)
@@ -664,6 +625,7 @@ class SuperiorDataset(Dataset):
             logger.warning(f"Error loading image at index {idx}: {e}", extra={'rank': 0})
             return torch.zeros(3, self.config.IMAGE_SIZE, self.config.IMAGE_SIZE), 0
 
+# FIXED: Updated data loader creation with proper num_workers handling
 def create_superior_data_loaders(config, local_rank=-1):
     train_dataset = SuperiorDataset(root_dir=config.TRAIN_PATH, config=config, is_training=True)
     train_size = int(0.7 * len(train_dataset))
@@ -675,17 +637,21 @@ def create_superior_data_loaders(config, local_rank=-1):
     val_dataset.dataset.is_training = False
     test_dataset.dataset.is_training = False
     train_sampler = DistributedSampler(train_dataset, rank=local_rank, shuffle=True) if config.DISTRIBUTED and local_rank != -1 else None
+    
+    # FIXED: Use num_workers=0 for distributed training to avoid CUDA multiprocessing issues
+    num_workers = 0 if config.DISTRIBUTED or torch.cuda.is_available() else config.NUM_WORKERS
+    
     train_loader = DataLoader(
         train_dataset, batch_size=config.BATCH_SIZE, shuffle=(train_sampler is None),
-        sampler=train_sampler, num_workers=config.NUM_WORKERS, pin_memory=True, drop_last=True
+        sampler=train_sampler, num_workers=num_workers, pin_memory=True, drop_last=True
     )
     val_loader = DataLoader(
         val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
-        num_workers=config.NUM_WORKERS, pin_memory=True
+        num_workers=num_workers, pin_memory=True
     )
     test_loader = DataLoader(
         test_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
-        num_workers=config.NUM_WORKERS, pin_memory=True
+        num_workers=num_workers, pin_memory=True
     )
     return train_loader, val_loader, test_loader
 
@@ -946,7 +912,9 @@ def plot_confusion_matrix(cm, class_names, save_path):
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
+# FIXED: Main training worker function with proper multiprocessing setup
 def superior_train_worker(local_rank, config, master_port):
+    # CRITICAL: Setup signal handlers and multiprocessing
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
@@ -957,6 +925,7 @@ def superior_train_worker(local_rank, config, master_port):
                 logger.error(f"Failed to setup distributed training for rank {local_rank}", extra={'rank': local_rank})
                 return
             config.DEVICE = torch.device(f'cuda:{local_rank}')
+            # FIXED: Move tensors to correct device after distributed setup
             config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(config.DEVICE)
             config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(config.DEVICE)
         
@@ -985,15 +954,36 @@ def superior_train_worker(local_rank, config, master_port):
         training_history = defaultdict(list)
         current_optimizer = None
         
+        start_epoch = 0
+        
+        # Check for existing checkpoint to resume training
+        resume_checkpoint_path = os.path.join(config.CHECKPOINT_DIR, "latest_checkpoint.pth")
+        if os.path.exists(resume_checkpoint_path) and local_rank in [-1, 0]:
+            try:
+                checkpoint = torch.load(resume_checkpoint_path, map_location=config.DEVICE)
+                if config.DISTRIBUTED:
+                    model.module.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_metrics = checkpoint.get('best_metrics', best_metrics)
+                training_history = defaultdict(list, checkpoint.get('training_history', {}))
+                epochs_no_improve = checkpoint.get('epochs_no_improve', 0)
+                logger.info(f"Resumed training from epoch {start_epoch}", extra={'rank': local_rank})
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint: {e}. Starting from scratch.", extra={'rank': local_rank})
+                start_epoch = 0
+        
         if local_rank in [-1, 0]:
             initial_trainable = model.module.get_trainable_params() if config.DISTRIBUTED else model.get_trainable_params()
             logger.info(f"Starting superior training with {initial_trainable:,} trainable parameters", extra={'rank': local_rank})
         
-        for epoch in range(config.EPOCHS):
-            start_time = time.time()
+        for epoch in range(start_epoch, config.EPOCHS):
+            epoch_start_time = time.time()
             model_for_unfreeze = model.module if config.DISTRIBUTED else model
             unfroze_this_epoch = progressive_unfreeze_advanced(model_for_unfreeze, epoch + 1, config)
-            if current_optimizer is None or unfroze_this_epoch or epoch == config.FINE_TUNE_START_EPOCH:
+            
+            if current_optimizer is None or unfroze_this_epoch or (epoch + 1) == config.FINE_TUNE_START_EPOCH:
                 current_optimizer = create_superior_optimizer(model, config, epoch + 1)
             
             model.train()
@@ -1011,7 +1001,9 @@ def superior_train_worker(local_rank, config, master_port):
                     use_mixup = True
                 else:
                     use_mixup = False
+                
                 current_optimizer.zero_grad()
+                
                 with autocast(enabled=config.USE_AMP):
                     model_output = model(data)
                     if use_mixup:
@@ -1023,22 +1015,28 @@ def superior_train_worker(local_rank, config, master_port):
                         else:
                             logits, features = model_output
                             loss = criterion(logits, target, features, None, epoch + 1)
+                
                 scaler.scale(loss).backward()
                 scaler.step(current_optimizer)
                 scaler.update()
+                
                 train_loss += loss.item()
                 train_batches += 1
+                
                 if local_rank in [-1, 0]:
                     progress_bar.set_postfix({'Loss': f'{loss.item():.4f}', 'Avg Loss': f'{train_loss/train_batches:.4f}'})
+                
                 if batch_idx % 100 == 0:
                     cleanup_memory()
             
             avg_train_loss = train_loss / train_batches
+            
             if local_rank in [-1, 0]:
                 training_history['train_loss'].append(avg_train_loss)
                 val_loss, val_metrics, val_preds, val_targets, val_probs = evaluate_superior_model(
                     model, val_loader, criterion, config, config.DEVICE, epoch + 1, local_rank
                 )
+                
                 training_history['val_loss'].append(val_loss)
                 training_history['val_accuracy'].append(val_metrics['accuracy'])
                 training_history['val_mcc'].append(val_metrics['mcc'])
@@ -1049,15 +1047,18 @@ def superior_train_worker(local_rank, config, master_port):
                 training_history['semi_recall'].append(val_metrics['semi_synthetic_recall'])
                 training_history['semi_confusion_rate'].append(val_metrics['semi_confusion_rate'])
                 training_history['val_metrics'].append(val_metrics)
-                epoch_time = time.time() - start_time
+                
+                epoch_time = time.time() - epoch_start_time
                 logger.info(f"Epoch {epoch+1}/{config.EPOCHS} completed in {epoch_time:.2f}s", extra={'rank': local_rank})
                 logger.info(f"Train Loss: {avg_train_loss:.4f}", extra={'rank': local_rank})
                 logger.info(f"Val Loss: {val_loss:.4f}, Val Acc: {val_metrics['accuracy']:.4f}, Val MCC: {val_metrics['mcc']:.4f}", extra={'rank': local_rank})
                 logger.info(f"Semi-synthetic - Precision: {val_metrics['semi_synthetic_precision']:.4f}, "
                            f"Recall: {val_metrics['semi_synthetic_recall']:.4f}, F1: {val_metrics['semi_synthetic_f1']:.4f}", extra={'rank': local_rank})
                 logger.info(f"Semi-synthetic Confusion Rate: {val_metrics['semi_confusion_rate']:.4f}", extra={'rank': local_rank})
+                
                 current_score = val_metrics['semi_synthetic_f1'] * 0.6 + val_metrics['mcc'] * 0.4
                 best_score = best_metrics['semi_synthetic_f1'] * 0.6 + best_metrics['mcc'] * 0.4
+                
                 if current_score > best_score:
                     best_metrics = val_metrics.copy()
                     best_model_path = os.path.join(config.CHECKPOINT_DIR, "best_superior_model.pth")
@@ -1065,12 +1066,27 @@ def superior_train_worker(local_rank, config, master_port):
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
+                
+                latest_checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
+                    'optimizer_state_dict': current_optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'best_metrics': best_metrics,
+                    'training_history': dict(training_history),
+                    'epochs_no_improve': epochs_no_improve,
+                    'config': config.__dict__
+                }
+                torch.save(latest_checkpoint, os.path.join(config.CHECKPOINT_DIR, "latest_checkpoint.pth"))
+                
                 if (epoch + 1) % config.CHECKPOINT_EVERY_N_EPOCHS == 0:
                     checkpoint_path = os.path.join(config.CHECKPOINT_DIR, f"superior_checkpoint_epoch_{epoch+1}.pth")
                     save_superior_checkpoint(model, current_optimizer, scaler, epoch, val_metrics, config, checkpoint_path, local_rank=local_rank)
+                
                 plot_superior_metrics(training_history, os.path.join(config.CHECKPOINT_DIR, f'superior_metrics_epoch_{epoch+1}.png'))
                 cm = confusion_matrix(val_targets, val_preds)
                 plot_confusion_matrix(cm, config.CLASS_NAMES, os.path.join(config.CHECKPOINT_DIR, f'superior_cm_epoch_{epoch+1}.png'))
+                
                 if epochs_no_improve >= config.EARLY_STOPPING_PATIENCE:
                     logger.info(f"Early stopping triggered after {epoch+1} epochs", extra={'rank': local_rank})
                     break
@@ -1090,20 +1106,25 @@ def superior_train_worker(local_rank, config, master_port):
                 else:
                     model.load_state_dict(checkpoint['model_state_dict'])
                 logger.info(f"Best model loaded - Semi-synthetic F1: {checkpoint['metrics']['semi_synthetic_f1']:.4f}", extra={'rank': local_rank})
+            
             test_loss, test_metrics, test_preds, test_targets, test_probs = evaluate_superior_model(
                 model, test_loader, criterion, config, config.DEVICE, epoch + 1, local_rank
             )
+            
             logger.info(f"Test Loss: {test_loss:.4f}", extra={'rank': local_rank})
             logger.info(f"Test Accuracy: {test_metrics['accuracy']:.4f}", extra={'rank': local_rank})
             logger.info(f"Test MCC: {test_metrics['mcc']:.4f}", extra={'rank': local_rank})
             logger.info(f"Semi-synthetic - Precision: {test_metrics['semi_synthetic_precision']:.4f}, "
                        f"Recall: {test_metrics['semi_synthetic_recall']:.4f}, F1: {test_metrics['semi_synthetic_f1']:.4f}", extra={'rank': local_rank})
+            
             class_report = classification_report(test_targets, test_preds, target_names=config.CLASS_NAMES, digits=4)
             logger.info(f"\nDETAILED CLASSIFICATION REPORT:\n{class_report}", extra={'rank': local_rank})
+            
             cm = test_metrics['confusion_matrix']
             logger.info(f"CONFUSION MATRIX:\nClasses: {config.CLASS_NAMES}", extra={'rank': local_rank})
             for i, row in enumerate(cm):
                 logger.info(f"{config.CLASS_NAMES[i]}: {row}", extra={'rank': local_rank})
+            
             final_results = {
                 'training_history': dict(training_history),
                 'best_val_metrics': best_metrics,
@@ -1145,11 +1166,16 @@ def superior_train_single_gpu(config):
     return superior_train_worker(-1, config, config.MASTER_PORT)
 
 def main():
+    # CRITICAL FIX: Set multiprocessing start method before any CUDA operations
+    set_multiprocessing_start_method()
+    
+    # Environment setup for distributed training
     os.environ['NCCL_DEBUG'] = 'INFO'
     os.environ['NCCL_SOCKET_IFNAME'] = 'lo'
     os.environ['NCCL_P2P_DISABLE'] = '1'
     os.environ['NCCL_IB_DISABLE'] = '1'
     os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(torch.cuda.device_count()))
+    
     parser = argparse.ArgumentParser(description='Superior Deepfake Detection Training')
     parser.add_argument('--train_path', type=str, default='datasets/train')
     parser.add_argument('--batch_size', type=int, default=28)
@@ -1167,7 +1193,7 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--fine_tune_start', type=int, default=26)
     parser.add_argument('--unfreeze_epochs', type=int, nargs='+', default=[1, 6, 16, 26, 36])
-    parser.add_argument('--early_stopping_patience', type=int, default=8)
+    parser.add_argument('--early_stopping_patience', type=int, default=40)
     parser.add_argument('--checkpoint_dir', type=str, default='gan_checkpoints')
     parser.add_argument('--checkpoint_every_n_epochs', type=int, default=3)
     parser.add_argument('--no_mixup', action='store_true')
@@ -1177,7 +1203,10 @@ def main():
     parser.add_argument('--distributed', action='store_true')
     parser.add_argument('--master_addr', type=str, default='localhost')
     parser.add_argument('--master_port', type=str, default='12355')
+    parser.add_argument('--resume', action='store_true', help='Resume training from latest checkpoint')
+    
     args = parser.parse_args()
+    
     config = SuperiorConfig()
     config.TRAIN_PATH = args.train_path
     config.BATCH_SIZE = args.batch_size
@@ -1205,13 +1234,22 @@ def main():
     config.DISTRIBUTED = args.distributed
     config.MASTER_ADDR = args.master_addr
     config.MASTER_PORT = args.master_port
-    config.FOCAL_ALPHA = torch.tensor([1.0, 3.0, 2.5]).to(config.DEVICE)
-    config.CLASS_WEIGHTS = torch.tensor([1.0, 3.0, 2.0]).to(config.DEVICE)
+    
+    # FIXED: Handle tensor device assignment properly
+    if not config.DISTRIBUTED:
+        config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(config.DEVICE)
+        config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(config.DEVICE)
+    # For distributed training, tensors will be moved to device in worker function
+    
     config.validate()
+    
     if config.DISTRIBUTED and torch.cuda.device_count() > 1:
         master_port = find_free_port(int(config.MASTER_PORT))
         logger.info(f"Using master port: {master_port}", extra={'rank': 0})
         world_size = torch.cuda.device_count()
+        logger.info(f"Starting distributed training with {world_size} GPUs", extra={'rank': 0})
+        
+        # FIXED: Use spawn method for multiprocessing
         mp.spawn(
             superior_train_worker,
             args=(config, str(master_port)),
@@ -1219,6 +1257,7 @@ def main():
             join=True
         )
     else:
+        logger.info("Starting single GPU training", extra={'rank': 0})
         superior_train_single_gpu(config)
 
 if __name__ == '__main__':
