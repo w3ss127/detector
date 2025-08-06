@@ -60,20 +60,45 @@ logger.handlers = [handler]
 
 # Utility functions for device consistency
 def ensure_model_device(model, device, rank):
+    """Ensure all model parameters and buffers are on the correct device."""
     model.to(device)
+    
+    # Force move all parameters to the correct device
     for name, param in model.named_parameters():
         if param.device != device:
             logger.warning(f"Moving parameter {name} from {param.device} to {device}", extra={'rank': rank})
-            param.data = param.data.to(device)
+            param.data = param.data.to(device, non_blocking=True)
+    
+    # Force move all buffers to the correct device
     for name, buffer in model.named_buffers():
         if buffer.device != device:
             logger.warning(f"Moving buffer {name} from {buffer.device} to {device}", extra={'rank': rank})
-            buffer.data = buffer.data.to(device)
+            buffer.data = buffer.data.to(device, non_blocking=True)
+    
+    # Handle spectral norm parameters specifically
+    for module in model.modules():
+        if hasattr(module, 'weight_u') and module.weight_u is not None:
+            if module.weight_u.device != device:
+                module.weight_u = module.weight_u.to(device, non_blocking=True)
+        if hasattr(module, 'weight_v') and module.weight_v is not None:
+            if module.weight_v.device != device:
+                module.weight_v = module.weight_v.to(device, non_blocking=True)
 
 def check_model_devices(model, expected_device, rank):
+    """Check if all model parameters are on the expected device."""
+    device_issues = []
     for name, param in model.named_parameters():
         if param.device != expected_device:
-            logger.error(f"Parameter {name} is on {param.device}, expected {expected_device}", extra={'rank': rank})
+            device_issues.append(f"Parameter {name} is on {param.device}, expected {expected_device}")
+    
+    if device_issues:
+        logger.error(f"Device mismatch issues found: {len(device_issues)}", extra={'rank': rank})
+        for issue in device_issues[:10]:  # Show first 10 issues
+            logger.error(issue, extra={'rank': rank})
+        if len(device_issues) > 10:
+            logger.error(f"... and {len(device_issues) - 10} more issues", extra={'rank': rank})
+        return False
+    return True
 
 # Distributed training utilities
 def find_free_port():
@@ -121,7 +146,7 @@ class UltimateDeepfakeConfig:
         self.FREEZE_BACKBONES = True
         self.ATTENTION_DROPOUT = 0.25
         self.USE_SPECTRAL_NORM = True
-        self.DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.DISTRIBUTED = torch.cuda.device_count() > 1
         self.BACKEND = "nccl"
         self.MASTER_ADDR = "localhost"
@@ -605,7 +630,13 @@ class UltimateForensicsModule(nn.Module):
             if isinstance(module, nn.Linear):
                 if not hasattr(module, 'weight_u'):
                     module = nn.utils.spectral_norm(module)
+                    # Ensure the spectral norm module is on the correct device
                     module.to(self.config.DEVICE)
+                    # Force move spectral norm parameters
+                    if hasattr(module, 'weight_u') and module.weight_u is not None:
+                        module.weight_u = module.weight_u.to(self.config.DEVICE, non_blocking=True)
+                    if hasattr(module, 'weight_v') and module.weight_v is not None:
+                        module.weight_v = module.weight_v.to(self.config.DEVICE, non_blocking=True)
     
     def extract_edge_inconsistencies(self, x):
         gray = 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
@@ -704,7 +735,13 @@ class UltimateAttentionModule(nn.Module):
             if isinstance(module, nn.Linear):
                 if not hasattr(module, 'weight_u'):
                     module = nn.utils.spectral_norm(module)
+                    # Ensure the spectral norm module is on the correct device
                     module.to(self.config.DEVICE)
+                    # Force move spectral norm parameters
+                    if hasattr(module, 'weight_u') and module.weight_u is not None:
+                        module.weight_u = module.weight_u.to(self.config.DEVICE, non_blocking=True)
+                    if hasattr(module, 'weight_v') and module.weight_v is not None:
+                        module.weight_v = module.weight_v.to(self.config.DEVICE, non_blocking=True)
     
     def forward(self, x):
         batch_size = x.size(0)
@@ -810,7 +847,13 @@ class UltimateModel(nn.Module):
             if isinstance(module, nn.Linear):
                 if not hasattr(module, 'weight_u'):
                     module = nn.utils.spectral_norm(module)
+                    # Ensure the spectral norm module is on the correct device
                     module.to(self.config.DEVICE)
+                    # Force move spectral norm parameters
+                    if hasattr(module, 'weight_u') and module.weight_u is not None:
+                        module.weight_u = module.weight_u.to(self.config.DEVICE, non_blocking=True)
+                    if hasattr(module, 'weight_v') and module.weight_v is not None:
+                        module.weight_v = module.weight_v.to(self.config.DEVICE, non_blocking=True)
     
     def freeze_backbones(self):
         for param in self.convnext.parameters():
@@ -1130,8 +1173,18 @@ def ultimate_train_worker(local_rank, config, master_port):
                 logger.error(f"Failed to setup distributed training for rank {local_rank}", extra={'rank': local_rank})
                 return
             config.DEVICE = torch.device(f'cuda:{local_rank}')
-            config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(config.DEVICE)
-            config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(config.DEVICE)
+            # Ensure tensors are on the correct device
+            config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(config.DEVICE, non_blocking=True)
+            config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(config.DEVICE, non_blocking=True)
+        else:
+            # For single GPU, ensure we use a specific device
+            if torch.cuda.is_available():
+                config.DEVICE = torch.device('cuda:0')
+            else:
+                config.DEVICE = torch.device('cpu')
+            # Ensure tensors are on the correct device
+            config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(config.DEVICE, non_blocking=True)
+            config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(config.DEVICE, non_blocking=True)
         
         logger.info(f"ULTIMATE TRAINING SETUP COMPLETE for rank {local_rank}", extra={'rank': local_rank})
         
@@ -1146,12 +1199,22 @@ def ultimate_train_worker(local_rank, config, master_port):
         train_loader, val_loader, test_loader = create_ultimate_data_loaders(config, local_rank)
         
         model = UltimateModel(config)
+        
+        # Ensure model is on the correct device before DDP wrapping
         ensure_model_device(model, config.DEVICE, local_rank)
+        
         if config.DISTRIBUTED:
             model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
-            check_model_devices(model.module, config.DEVICE, local_rank)
+            # Check device consistency after DDP wrapping
+            if not check_model_devices(model.module, config.DEVICE, local_rank):
+                logger.warning("Device mismatch detected after DDP wrapping, attempting to fix...", extra={'rank': local_rank})
+                ensure_model_device(model.module, config.DEVICE, local_rank)
+                check_model_devices(model.module, config.DEVICE, local_rank)
         else:
-            check_model_devices(model, config.DEVICE, local_rank)
+            if not check_model_devices(model, config.DEVICE, local_rank):
+                logger.warning("Device mismatch detected, attempting to fix...", extra={'rank': local_rank})
+                ensure_model_device(model, config.DEVICE, local_rank)
+                check_model_devices(model, config.DEVICE, local_rank)
         
         torch.cuda.empty_cache()
         cleanup_memory()

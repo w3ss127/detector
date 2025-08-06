@@ -70,99 +70,27 @@ class TestDataset(SuperiorDataset):
             logger.warning(f"Error loading image at {file_path}[{image_idx}]: {e}")
             return torch.zeros(3, self.config.IMAGE_SIZE, self.config.IMAGE_SIZE), -1, (file_path, image_idx)
 
-def test_individual_images(config, checkpoint_path="gan_checkpoints/best_superior_model.pth", gpu_id=None, use_cpu=False):
+def test_individual_images(config, checkpoint_path="gan_checkpoints/best_superior_model.pth"):
     """Test individual images from the test dataset and print results with per-class accuracy and MCC."""
-    # Set device - try to find a GPU with available memory
-    if use_cpu:
-        device = torch.device("cpu")
-        logger.info("Forced CPU usage")
-    elif torch.cuda.is_available():
-        if gpu_id is not None:
-            # Use specified GPU
-            if 0 <= gpu_id < torch.cuda.device_count():
-                try:
-                    torch.cuda.set_device(gpu_id)
-                    device = torch.device(f"cuda:{gpu_id}")
-                    memory_allocated = torch.cuda.memory_allocated(gpu_id)
-                    memory_total = torch.cuda.get_device_properties(gpu_id).total_memory
-                    memory_free = memory_total - memory_allocated
-                    logger.info(f"Using specified GPU {gpu_id} with {memory_free / 1024**3:.1f}GB free memory")
-                except Exception as e:
-                    logger.warning(f"Failed to use specified GPU {gpu_id}: {e}")
-                    device = torch.device("cpu")
-            else:
-                logger.warning(f"Specified GPU {gpu_id} not available, falling back to auto-selection")
-                gpu_id = None
-        
-        if gpu_id is None:
-            # Auto-select GPU with most free memory
-            gpu_memory = []
-            for i in range(torch.cuda.device_count()):
-                try:
-                    memory_allocated = torch.cuda.memory_allocated(i)
-                    memory_total = torch.cuda.get_device_properties(i).total_memory
-                    memory_free = memory_total - memory_allocated
-                    gpu_memory.append((i, memory_free))
-                except:
-                    gpu_memory.append((i, 0))
-            
-            # Sort by available memory (descending)
-            gpu_memory.sort(key=lambda x: x[1], reverse=True)
-            
-            # Try to use the GPU with most free memory
-            for gpu_id, free_memory in gpu_memory:
-                if free_memory > 2 * 1024 * 1024 * 1024:  # At least 2GB free
-                    try:
-                        torch.cuda.set_device(gpu_id)
-                        device = torch.device(f"cuda:{gpu_id}")
-                        logger.info(f"Using GPU {gpu_id} with {free_memory / 1024**3:.1f}GB free memory")
-                        break
-                    except:
-                        continue
-            else:
-                # If no GPU has enough memory, use CPU
-                device = torch.device("cpu")
-                logger.warning("No GPU with sufficient memory found, using CPU")
-    else:
-        device = torch.device("cpu")
-        logger.info("CUDA not available, using CPU")
-    
+    # Set device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config.DEVICE = device
-    
-    # Move tensors to device with error handling
-    try:
-        if hasattr(config, 'FOCAL_ALPHA') and config.FOCAL_ALPHA is not None:
-            if not config.FOCAL_ALPHA.is_cuda:
-                config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(device)
-        if hasattr(config, 'CLASS_WEIGHTS') and config.CLASS_WEIGHTS is not None:
-            if not config.CLASS_WEIGHTS.is_cuda:
-                config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(device)
-    except Exception as e:
-        logger.warning(f"Failed to move tensors to device: {e}")
-        # Continue without moving tensors if there's an error
+    config.FOCAL_ALPHA = config.FOCAL_ALPHA.to(device)
+    config.CLASS_WEIGHTS = config.CLASS_WEIGHTS.to(device)
 
-    # Initialize model with memory optimization
-    try:
-        model = SuperiorModel(config).to(device)
-        model.eval()
-        load_checkpoint(model, checkpoint_path, device)
-        
-        # Clear cache after model loading
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-    except Exception as e:
-        logger.error(f"Failed to load model: {e}")
-        raise
+    # Initialize model
+    model = SuperiorModel(config).to(device)
+    model.eval()
+    load_checkpoint(model, checkpoint_path, device)
 
-    # Initialize dataset with reduced memory usage
+    # Initialize dataset
     test_dataset = TestDataset(root_dir=config.TEST_PATH, config=config)
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=0,  # Reduced to prevent memory issues
-        pin_memory=False  # Disabled to reduce memory usage
+        num_workers=config.NUM_WORKERS,
+        pin_memory=True
     )
 
     # Lists to store predictions and true labels for metrics
@@ -172,61 +100,52 @@ def test_individual_images(config, checkpoint_path="gan_checkpoints/best_superio
     # Process each image
     logger.info("Starting individual image testing...")
     for images, labels, metadata in tqdm(test_loader, desc="Testing Images"):
-        try:
-            images = images.to(device)
-            file_path, image_idx = metadata[0][0], metadata[1][0].item()
-            
-            with torch.no_grad():
-                model_output = model(images)
-                if len(model_output) == 3:
-                    logits, features, (probs, epistemic_unc, aleatoric_unc, alpha) = model_output
-                else:
-                    logits, features = model_output
-                    probs = F.softmax(logits, dim=1)
-                    epistemic_unc, aleatoric_unc = None, None
+        images = images.to(device)
+        file_path, image_idx = metadata[0][0], metadata[1][0].item()
+        
+        with torch.no_grad():
+            model_output = model(images)
+            if len(model_output) == 3:
+                logits, features, (probs, epistemic_unc, aleatoric_unc, alpha) = model_output
+            else:
+                logits, features = model_output
+                probs = F.softmax(logits, dim=1)
+                epistemic_unc, aleatoric_unc = None, None
 
-                # Get predictions and probabilities
-                pred = logits.argmax(dim=1).item()
-                pred_class = config.CLASS_NAMES[pred]
-                probs = probs.cpu().numpy()[0]
-                prob_str = ", ".join([f"{cls}: {p:.4f}" for cls, p in zip(config.CLASS_NAMES, probs)])
+            # Get predictions and probabilities
+            pred = logits.argmax(dim=1).item()
+            pred_class = config.CLASS_NAMES[pred]
+            probs = probs.cpu().numpy()[0]
+            prob_str = ", ".join([f"{cls}: {p:.4f}" for cls, p in zip(config.CLASS_NAMES, probs)])
 
-                # Collect predictions and labels (if available)
-                all_preds.append(pred)
-                if labels.item() != -1:
-                    all_labels.append(labels.item())
-                else:
-                    all_labels.append(-1)  # Placeholder for unlabeled data
+            # Collect predictions and labels (if available)
+            all_preds.append(pred)
+            if labels.item() != -1:
+                all_labels.append(labels.item())
+            else:
+                all_labels.append(-1)  # Placeholder for unlabeled data
 
-                # Prepare output
-                output = [f"File: {file_path}, Image Index: {image_idx}"]
-                output.append(f"Predicted Class: {pred_class}")
-                if labels.item() != -1:
-                    true_class = config.CLASS_NAMES[labels.item()]
-                    output.append(f"True Class: {true_class}")
-                output.append(f"Probabilities: {prob_str}")
-                if config.USE_UNCERTAINTY_ESTIMATION and epistemic_unc is not None:
-                    epistemic_unc_np = epistemic_unc.squeeze().cpu().numpy()
-                    aleatoric_unc_np = aleatoric_unc.mean(dim=1).cpu().numpy()
-                    total_uncertainty = epistemic_unc_np + aleatoric_unc_np
-                    epistemic_unc_val = epistemic_unc_np.item() if epistemic_unc_np.ndim == 0 else epistemic_unc_np[0]
-                    aleatoric_unc_val = aleatoric_unc_np.item() if aleatoric_unc_np.ndim == 0 else aleatoric_unc_np[0]
-                    total_uncertainty_val = total_uncertainty.item() if total_uncertainty.ndim == 0 else total_uncertainty[0]
-                    output.append(f"Total Uncertainty: {total_uncertainty_val:.4f}")
-                    output.append(f"Epistemic Uncertainty: {epistemic_unc_val:.4f}")
-                    output.append(f"Aleatoric Uncertainty: {aleatoric_unc_val:.4f}")
+            # Prepare output
+            output = [f"File: {file_path}, Image Index: {image_idx}"]
+            output.append(f"Predicted Class: {pred_class}")
+            if labels.item() != -1:
+                true_class = config.CLASS_NAMES[labels.item()]
+                output.append(f"True Class: {true_class}")
+            output.append(f"Probabilities: {prob_str}")
+            if config.USE_UNCERTAINTY_ESTIMATION and epistemic_unc is not None:
+                epistemic_unc_np = epistemic_unc.squeeze().cpu().numpy()
+                aleatoric_unc_np = aleatoric_unc.mean(dim=1).cpu().numpy()
+                total_uncertainty = epistemic_unc_np + aleatoric_unc_np
+                epistemic_unc_val = epistemic_unc_np.item() if epistemic_unc_np.ndim == 0 else epistemic_unc_np[0]
+                aleatoric_unc_val = aleatoric_unc_np.item() if aleatoric_unc_np.ndim == 0 else aleatoric_unc_np[0]
+                total_uncertainty_val = total_uncertainty.item() if total_uncertainty.ndim == 0 else total_uncertainty[0]
+                output.append(f"Total Uncertainty: {total_uncertainty_val:.4f}")
+                output.append(f"Epistemic Uncertainty: {epistemic_unc_val:.4f}")
+                output.append(f"Aleatoric Uncertainty: {aleatoric_unc_val:.4f}")
 
-                # Print results
-                print("\n".join(output))
-                print("-" * 50)
-                
-            # Clear cache after each batch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-        except Exception as e:
-            logger.error(f"Error processing image {file_path}[{image_idx}]: {e}")
-            continue
+            # Print results
+            print("\n".join(output))
+            print("-" * 50)
 
     # Calculate and display per-class accuracy and MCC
     if all_labels.count(-1) < len(all_labels):  # Ensure there are labeled samples
@@ -268,8 +187,6 @@ def main():
     parser.add_argument('--no_forensics', action='store_true')
     parser.add_argument('--no_uncertainty', action='store_true')
     parser.add_argument('--no_spectral_norm', action='store_true')
-    parser.add_argument('--gpu_id', type=int, default=None, help='Specific GPU ID to use (0-7)')
-    parser.add_argument('--use_cpu', action='store_true', help='Force CPU usage')
     args = parser.parse_args()
 
     # Initialize config
@@ -287,7 +204,7 @@ def main():
     config.validate()
 
     # Run test
-    test_individual_images(config, args.checkpoint_path, args.gpu_id, args.use_cpu)
+    test_individual_images(config, args.checkpoint_path)
 
 if __name__ == '__main__':
     main()
