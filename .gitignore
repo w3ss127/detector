@@ -58,6 +58,7 @@ cover/
 # Model/Datasets
 *.pt
 *.pth
+*.pkl
 *.json
 
 # Django stuff:

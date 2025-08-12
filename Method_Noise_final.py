@@ -2750,7 +2750,7 @@ def main_ultra_advanced():
     print(f"\n📊 Loading dataset from {data_dir}...")
     load_start = time.time()
     try:
-        images, labels = load_and_verify_data(data_dir,max_images_per_class=120000)
+        images, labels = load_and_verify_data(data_dir,max_images_per_class=160000)
         load_time = time.time() - load_start
         print(f"✅ Dataset loaded in {load_time:.2f} seconds")
         print(f"📊 Dataset statistics:")
